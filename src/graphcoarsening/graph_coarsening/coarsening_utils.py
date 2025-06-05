@@ -464,7 +464,7 @@ def contract_variation_edges(G, A=None, K=10, r=0.5, algorithm="greedy"):
 
     # cost function for the edge
     def subgraph_cost(G, A, edge):
-        edge, w = edge[:2].astype(np.int), edge[2]
+        edge, w = edge[:2].astype(np.int64), edge[2]
         deg_new = 2 * deg[edge] - w
         L = np.array([[deg_new[0], -w], [-w, deg_new[1]]])
         B = Pibot @ A[edge, :]
@@ -547,7 +547,7 @@ def contract_variation_linear(G, A=None, K=10, r=0.5, mode="neighborhood"):
             family.append(CandidateSet(i_set))
 
     if "cliques" in mode:
-        import networkx as nx
+        import networkx.convert_matrix as nx
 
         Gnx = nx.from_scipy_sparse_matrix(G.W)
         for clique in nx.find_cliques(Gnx):
@@ -666,7 +666,7 @@ def get_proximity_measure(G, name, K=10):
 
     # heuristic for mutligrid
     elif name == "algebraic_JC":
-        proximity += np.Inf
+        proximity += np.inf
         for e in range(0, M):
             i, j = edges[:, e]
             for kIdx in range(num_vectors):
@@ -766,7 +766,7 @@ def get_proximity_measure(G, name, K=10):
 
         # heuristic for mutligrid (algebraic multigrid)
         elif name == "algebraic_GS":
-            proximity[e] = np.Inf
+            proximity[e] = np.inf
             for kIdx in range(num_vectors):
                 xk = X_gs[:, kIdx]
                 proximity[e] = min(
@@ -801,10 +801,10 @@ def generate_test_vectors(
 
     if method == "JC" or method == "Jacobi":
 
-        deg = G.dw.astype(np.float)
+        deg = G.dw.astype(np.float32)
         D = sp.sparse.diags(deg, 0)
         deginv = deg ** (-1)
-        deginv[deginv == np.Inf] = 0
+        deginv[deginv == np.inf] = 0
         Dinv = sp.sparse.diags(deginv, 0)
         M = Dinv.dot(D - L)
 
