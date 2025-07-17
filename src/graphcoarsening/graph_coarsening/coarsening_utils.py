@@ -3,7 +3,8 @@ import pygsp as gsp
 from pygsp import graphs, filters, reduction
 import scipy as sp
 from scipy import sparse
-
+import torch
+import torch.nn.functional as F
 import matplotlib
 import matplotlib.pylab as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -15,6 +16,7 @@ from . import maxWeightMatching
 
 def coarsen(
     G,
+    X=None, # WHT: node features
     K=10,
     r=0.5,
     max_levels=10,
@@ -108,7 +110,7 @@ def coarsen(
                 )
             else:
                 coarsening_list = contract_variation_linear(
-                    G, K=K, A=A, r=r_cur, mode=method
+                    G, X=X, K=K, A=A, r=r_cur, mode=method
                 )
 
         else:
@@ -142,6 +144,8 @@ def coarsen(
         Gall.append(Gc)
 
         n = Gc.N
+        iCt = torch.tensor(iC.toarray(), dtype=torch.float32, device=X.device if X is not None else "cpu")
+        X = iCt @ X if X is not None else None
 
         if n <= n_target:
             break
@@ -185,6 +189,7 @@ def get_coarsening_matrix(G, partitioning):
     ----------
     G : the graph to be coarsened
     partitioning : a list of subgraphs to be contracted
+    X : node features 
 
     Returns
     -------
@@ -496,7 +501,8 @@ def contract_variation_edges(G, A=None, K=10, r=0.5, algorithm="greedy"):
     return coarsening_list
 
 
-def contract_variation_linear(G, A=None, K=10, r=0.5, mode="neighborhood"):
+# TODO(WHT): include features for each node
+def contract_variation_linear(G, X=None, A=None, K=10, r=0.5, mode="neighborhood"):
     """
     Sequential contraction with local variation and general families.
     This is an implemmentation that improves running speed,
@@ -580,10 +586,19 @@ def contract_variation_linear(G, A=None, K=10, r=0.5, mode="neighborhood"):
     # n, n_target = N, (1-r)*N
     n_reduce = np.floor(r * N)  # how many nodes do we need to reduce/eliminate?
 
+
+    def similarity(nodes_features):        
+        x_norm = F.normalize(nodes_features, p=2, dim=1)
+        s = x_norm @ x_norm.T
+        n = s.shape[0]  
+        return torch.sum(torch.triu(s, diagonal=1)) / ((n - 1) * n / 2)
+    
     while len(family) > 0:
 
         i_cset = family.pop(index=0)
         i_set = i_cset.set
+
+        if len(i_set) <= 1: continue
 
         # check if marked
         i_marked = marked[i_set]
@@ -594,26 +609,35 @@ def contract_variation_linear(G, A=None, K=10, r=0.5, mode="neighborhood"):
             if n_gain > n_reduce:
                 continue  # this helps avoid over-reducing
 
-            # all vertices are unmarked: add i_set to the coarsening list
-            marked[i_set] = True
-            coarsening_list.append(i_set)
-            # n -= len(i_set) - 1
-            n_reduce -= n_gain
+            if X is not None and len(i_set) > 1:
+                sim = similarity(X[i_set])
+            else: sim = 1.0
+
+            # print(f"{sim=}, {len(i_set)=}, {i_set=}, {X[i_set]=}")
+
+            # probability based on similarity merging
+            if sim > 0.75:
+
+                # all vertices are unmarked: add i_set to the coarsening list
+                marked[i_set] = True
+                coarsening_list.append(i_set)
+                # n -= len(i_set) - 1
+                n_reduce -= n_gain
 
             # if n <= n_target: break
             if n_reduce <= 0:
                 break
 
         # may be worth to keep this set
-        else:
-            i_set = i_set[~i_marked]
-            if len(i_set) > 1:
-                # todo1: check whether to add to coarsening_list before adding to family
-                # todo2: currently this will also select contraction sets that are disconnected
-                # should we eliminate those?
-                i_cset.set = i_set
-                i_cset.cost = subgraph_cost(i_set)
-                family.add(i_cset)
+        # else:
+        #     i_set = i_set[~i_marked]
+        #     if len(i_set) > 1:
+        #         # todo1: check whether to add to coarsening_list before adding to family
+        #         # todo2: currently this will also select contraction sets that are disconnected
+        #         # should we eliminate those?
+        #         i_cset.set = i_set
+        #         i_cset.cost = subgraph_cost(i_set)
+        #         family.add(i_cset)
 
     return coarsening_list
 
