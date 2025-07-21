@@ -25,6 +25,7 @@ def coarsen(
     Uk=None,
     lk=None,
     max_level_r=0.99,
+    similarity_threshold=0.5
 ):
     """
     This function provides a common interface for coarsening algorithms that contract subgraphs
@@ -106,11 +107,11 @@ def coarsen(
 
             if method == "variation_edges":
                 coarsening_list = contract_variation_edges(
-                    G, K=K, A=A, r=r_cur, algorithm=algorithm
+                    G, X=X, K=K, A=A, r=r_cur, algorithm=algorithm, similarity_threshold=similarity_threshold
                 )
             else:
                 coarsening_list = contract_variation_linear(
-                    G, X=X, K=K, A=A, r=r_cur, mode=method
+                    G, X=X, K=K, A=A, r=r_cur, mode=method, similarity_threshold=similarity_threshold
                 )
 
         else:
@@ -157,6 +158,11 @@ def coarsen(
 # General coarsening utility functions
 ################################################################################
 
+def similarity(nodes_features):        
+    x_norm = F.normalize(nodes_features, p=2, dim=1)
+    s = x_norm @ x_norm.T
+    n = s.shape[0]  
+    return torch.sum(torch.triu(s, diagonal=1)) / ((n - 1) * n / 2)
 
 def coarsen_vector(x, C):
     return (C.power(2)).dot(x)
@@ -454,7 +460,7 @@ def plot_coarsening(
 ################################################################################
 
 
-def contract_variation_edges(G, A=None, K=10, r=0.5, algorithm="greedy"):
+def contract_variation_edges(G, X=None, A=None, K=10, r=0.5, algorithm="greedy", similarity_threshold=0.5):
     """
     Sequential contraction with local variation and edge-based families.
     This is a specialized implementation for the edge-based family, that works
@@ -496,13 +502,13 @@ def contract_variation_edges(G, A=None, K=10, r=0.5, algorithm="greedy"):
 
     elif algorithm == "greedy":
         # find a heavy weight matching
-        coarsening_list = matching_greedy(G, weights=-weights, r=r)
+        coarsening_list = matching_greedy(G, X=X, weights=-weights, r=r, similarity_threshold=similarity_threshold)
 
     return coarsening_list
 
 
 # TODO(WHT): include features for each node
-def contract_variation_linear(G, X=None, A=None, K=10, r=0.5, mode="neighborhood"):
+def contract_variation_linear(G, X=None, A=None, K=10, r=0.5, mode="neighborhood", similarity_threshold=0.5):
     """
     Sequential contraction with local variation and general families.
     This is an implemmentation that improves running speed,
@@ -585,13 +591,6 @@ def contract_variation_linear(G, X=None, A=None, K=10, r=0.5, mode="neighborhood
     coarsening_list = []
     # n, n_target = N, (1-r)*N
     n_reduce = np.floor(r * N)  # how many nodes do we need to reduce/eliminate?
-
-
-    def similarity(nodes_features):        
-        x_norm = F.normalize(nodes_features, p=2, dim=1)
-        s = x_norm @ x_norm.T
-        n = s.shape[0]  
-        return torch.sum(torch.triu(s, diagonal=1)) / ((n - 1) * n / 2)
     
     while len(family) > 0:
 
@@ -616,7 +615,7 @@ def contract_variation_linear(G, X=None, A=None, K=10, r=0.5, mode="neighborhood
             # print(f"{sim=}, {len(i_set)=}, {i_set=}, {X[i_set]=}")
 
             # probability based on similarity merging
-            if sim > 0.75:
+            if sim > similarity_threshold:
 
                 # all vertices are unmarked: add i_set to the coarsening list
                 marked[i_set] = True
@@ -920,7 +919,7 @@ def matching_optimal(G, weights, r=0.4):
     return matching
 
 
-def matching_greedy(G, weights, r=0.4):
+def matching_greedy(G, weights, X=None, r=0.4, similarity_threshold=0.5):
     """
     Generates a matching greedily by selecting at each iteration the edge
     with the largest weight and then removing all adjacent edges from the
@@ -931,8 +930,12 @@ def matching_greedy(G, weights, r=0.4):
     G : pygsp graph
     weights : np.array(M)
         a weight for each edge
+    X : np.array(N, D), optional
+        node features, used for computing similarity
     r : float
         The desired dimensionality reduction (r = 1 - n/N)
+    similarity_threshold : float
+        The threshold for considering two nodes as similar
 
     Notes:
     * The complexity of this is O(M)
@@ -968,11 +971,16 @@ def matching_greedy(G, weights, r=0.4):
         if any(marked[[i, j]]):
             continue
 
-        marked[[i, j]] = True
-        n -= 1
+        if X is not None:
+            sim = similarity(X[[i, j]])
+        else: sim = 1.0
 
-        # add it to the matching
-        matching.append(np.array([i, j]))
+        if sim > similarity_threshold:
+            marked[[i, j]] = True
+            n -= 1
+
+            # add it to the matching
+            matching.append(np.array([i, j]))
 
         # termination condition
         if n <= n_target:
