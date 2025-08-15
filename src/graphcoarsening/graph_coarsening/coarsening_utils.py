@@ -517,14 +517,12 @@ def contract_variation_linear(G, X=None, A=None, K=10, r=0.5, mode="neighborhood
     See contract_variation() for documentation.
     """
 
-    N, deg, W_lil = G.N, G.dw, G.W.tolil()
+    N, deg, W_csr = G.N, G.dw, G.W.tocsr()  # use csr instead of lil
 
     # The following is correct only for a single level of coarsening.
     # Normally, A should be passed as an argument.
     if A is None:
-        lk, Uk = sp.sparse.linalg.eigsh(
-            G.L, k=K, which="SM", tol=1e-3
-        )  # this is not optimized!
+        lk, Uk = sp.sparse.linalg.eigsh(G.L, k=K, which="SM", tol=1e-3)
         lk[0] = 1
         lsinv = lk ** (-0.5)
         lsinv[0] = 0
@@ -536,8 +534,8 @@ def contract_variation_linear(G, X=None, A=None, K=10, r=0.5, mode="neighborhood
     def subgraph_cost(nodes):
         nc = len(nodes)
         ones = np.ones(nc)
-        W = W_lil[nodes, :][:, nodes]  # .tocsc()
-        L = np.diag(2 * deg[nodes] - W.dot(ones)) - W
+        W = W_csr[nodes][:, nodes]  # subgraph adjacency
+        L = np. diag(2 * deg[nodes] - W.dot(ones)) - W.toarray()
         B = (np.eye(nc) - np.outer(ones, ones) / nc) @ A[nodes, :]
         return np.linalg.norm(B.T @ L @ B) / (nc - 1)
 
@@ -545,16 +543,13 @@ def contract_variation_linear(G, X=None, A=None, K=10, r=0.5, mode="neighborhood
         def __init__(self, candidate_list):
             self.set = candidate_list
             self.cost = subgraph_cost(candidate_list)
-
         def __lt__(self, other):
             return self.cost < other.cost
 
     family = []
-    W_bool = G.A + sp.sparse.eye(G.N, dtype=np.bool, format="csr")
+    W_bool = G.A + sp.sparse.eye(G.N, dtype=bool, format="csr")
     if "neighborhood" in mode:
         for i in range(N):
-            # i_set = G.A[i,:].indices # graph_utils.get_neighbors(G, i)
-            # i_set = np.append(i_set, i)
             i_set = W_bool[i, :].indices
             family.append(CandidateSet(i_set))
 
