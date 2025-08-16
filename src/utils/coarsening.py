@@ -25,9 +25,13 @@ def apply_Loukas_coarsening(G: graphs.Graph, X=None, method='variation_neighborh
 
 def create_pygsp_graph(edges, num_nodes, weights=None) -> graphs.Graph:
     """
-    - edges: Mx2 NUMPY array, each row is an edge (source, target)
-    - weights: Mx1 NUMPY array, weights corresponding to each edge
-    - num_nodes: int, total number of nodes in the graph
+    Input:
+      - edges: Mx2 NUMPY array, each row is an edge (source, target)
+      - weights: Mx1 NUMPY array, weights corresponding to each edge
+      - num_nodes: int, total number of nodes in the graph
+    Output:
+      - G: pygsp Graph object with the adjacency matrix constructed from edges and weights
+    Note: The adjacency matrix is symmetric, so the graph is undirected.
     """
 
     if weights is None: weights = np.ones(len(edges))
