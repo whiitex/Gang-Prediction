@@ -145,8 +145,25 @@ def coarsen(
         Gall.append(Gc)
 
         n = Gc.N
-        iCt = torch.tensor(iC.toarray(), dtype=torch.float32, device=X.device if X is not None else "cpu")
-        X = iCt @ X if X is not None else None
+        # iCt = torch.tensor(iC.toarray(), dtype=torch.float32, device=X.device if X is not None else "cpu")
+        # X = iCt @ X if X is not None else None
+
+        if X is not None:
+            # Convert sparse scipy matrix to sparse torch tensor
+            coo = iC.tocoo()  # Convert to COO format which is memory efficient
+            indices = torch.stack([torch.from_numpy(coo.row), torch.from_numpy(coo.col)])
+            values = torch.from_numpy(coo.data).float()
+            shape = coo.shape
+            
+            # Create sparse tensor
+            iCt_sparse = torch.sparse_coo_tensor(
+                indices, values, shape, 
+                dtype=torch.float32, 
+                device=X.device
+            ).coalesce()  # Coalesce to remove duplicate entries
+            
+            # Perform sparse matrix multiplication
+            X = torch.sparse.mm(iCt_sparse, X)
 
         if n <= n_target:
             break
@@ -549,9 +566,11 @@ def contract_variation_linear(G, X=None, A=None, K=10, r=0.5, mode="neighborhood
     family = []
     W_bool = G.A + sp.sparse.eye(G.N, dtype=bool, format="csr")
     if "neighborhood" in mode:
-        for i in range(N):
+        for i in range(2, N-2):
+            # print('processing node', i, 'of', N)
             i_set = W_bool[i, :].indices
             family.append(CandidateSet(i_set))
+
 
     if "cliques" in mode:
         import networkx.convert_matrix as nx
