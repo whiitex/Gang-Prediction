@@ -130,3 +130,109 @@ def create_P(indices, n, device="cpu"):
     P_values = torch.ones(n_t, device=device)
     P = torch.sparse_coo_tensor(P_indices, P_values, (n, n_t), device=device)
     return P
+
+
+import torch
+
+
+def _spmm(A, B):
+    """Sparse x dense matrix multiply that works for COO/CSR/BSR."""
+    if B.dim() == 1:  # (n,) -> (n,1)
+        return (A @ B.unsqueeze(1)).squeeze(1)
+    return A @ B
+
+
+def _cg_multi(A_mv, B, tol=1e-6, maxiter=None, M=None):
+    """
+    Solve A X = B for multiple RHS (columns of B) with (preconditioned) CG.
+    A_mv: callable(V) -> A @ V
+    B: [m, d] dense
+    M: optional preconditioner callable(V) ≈ A^{-1} V (e.g., Jacobi)
+    """
+    m, d = B.shape
+    X = torch.zeros_like(B)
+    R = B - A_mv(X)
+    Z = M(R) if M is not None else R
+    P = Z.clone()
+
+    # Per-column inner products
+    def col_dot(U, V):  # returns [d]
+        return (U * V).sum(dim=0)
+
+    rz_old = col_dot(R, Z)  # [d]
+    normB = B.norm(dim=0)  # [d]
+    active = normB > 0
+    if maxiter is None:
+        maxiter = 2 * m  # simple cap
+
+    for _ in range(maxiter):
+        AP = A_mv(P)  # [m, d]
+        denom = col_dot(P, AP).clamp_min(1e-30)  # [d]
+        alpha = torch.zeros_like(denom)
+        alpha[active] = rz_old[active] / denom[active]
+        X = X + P * alpha.unsqueeze(0)
+        R = R - AP * alpha.unsqueeze(0)
+
+        # Convergence (per column)
+        done = R.norm(dim=0) <= tol * normB
+        new_active = active & (~done)
+        if not new_active.any():
+            break
+        active = new_active
+
+        Z = M(R) if M is not None else R
+        rz_new = col_dot(R, Z)
+        beta = torch.zeros_like(rz_new)
+        nz = rz_old.abs() > 0
+        beta[nz] = rz_new[nz] / rz_old[nz]
+        P = Z + P * beta.unsqueeze(0)
+        rz_old = rz_new
+    return X
+
+
+def min_norm_lstsq_sparse_multi(
+    C, Y, lam=0.0, tol=1e-6, maxiter=None, precondition=True
+):
+    """
+    Solve min_X ||Y - C X||_F^2 with sparse C (m<n) via dual CG on (C C^T + lam I) Z = Y.
+    Returns the (approx.) minimum-norm solution X = C^T Z (ridge if lam>0).
+
+    C:   sparse tensor [m, n] (COO/CSR/BSR)
+    Y:   dense tensor  [m, d]
+    lam: Tikhonov damping (>=0) for stability
+    """
+    assert C.layout in (
+        torch.sparse_coo,
+        torch.sparse_csr,
+        torch.sparse_bsr,
+    ), "C must be sparse"
+    m, n = C.shape
+    assert Y.shape[0] == m
+
+    Ct = C.transpose(0, 1)
+
+    def A_mv(V):  # V: [m, d]
+        out = _spmm(C, _spmm(Ct, V))
+        return out if lam == 0.0 else out + lam * V
+
+    # Jacobi preconditioner M ≈ (C C^T + lam I)^{-1}
+    if precondition:
+        Cc = (
+            C.coalesce()
+            if C.layout == torch.sparse_coo
+            else C.to_sparse_coo().coalesce()
+        )
+        rows = Cc.indices()[0]
+        diag = torch.zeros(m, dtype=Cc.dtype, device=Cc.device)
+        diag.scatter_add_(0, rows, Cc.values() ** 2)
+        if lam != 0.0:
+            diag = diag + lam
+        diag = diag.clamp_min(1e-12)
+        M = lambda V: V / diag.unsqueeze(1)  # row-wise scaling
+    else:
+        M = None
+
+    # Solve for Z, then recover X
+    Z = _cg_multi(A_mv, Y, tol=tol, maxiter=maxiter, M=M)  # [m, d]
+    X = _spmm(Ct, Z)  # [n, d]
+    return X

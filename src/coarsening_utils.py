@@ -189,13 +189,16 @@ def construct_G(G: Data, iC: SparseTensor):
     indices = Wc.indices()
     values = Wc.values()
     num_nodes = Wc.size(0)
-    x = torch.sparse.mm(iC, G.x) if G.x is not None else None
+    # x = torch.sparse.mm(iC, G.x) if G.x is not None else None
+    x = coarsen_vector(G.x, iC) if G.x is not None else None
     Gc = Data(x=x, edge_index=indices, edge_weight=values, num_nodes=num_nodes)
-    Gc.soft_y = torch.sparse.mm(iC, G.soft_y) if G.soft_y is not None else None
+    # Gc.soft_y = torch.sparse.mm(iC, G.soft_y) if G.soft_y is not None else None
+    Gc.soft_y = coarsen_vector(G.soft_y, iC) if G.soft_y is not None else None
     Gc.W, Gc.L, Gc.dw = graph_params(Gc)
 
     embeddings = (
-        torch.sparse.mm(iC, G.embeddings)
+        # torch.sparse.mm(iC, G.embeddings)
+        coarsen_vector(G.embeddings, iC)
         if hasattr(G, "embeddings") and G.embeddings is not None
         else None
     )
@@ -622,18 +625,19 @@ def contract_variation_edges(
     Pibot = torch.eye(2) - torch.outer(ones, ones) / 2
 
     # cost function for the edge
-    def subgraph_cost(G, A, edge):
+    def subgraph_cost(A, edge, w):
         # edge, w = edge[:2].astype(torch.int64), edge[2]
-        edge = G.edge_index
-        w = G.edge_weight
+        # edge = G.edge_index
+        # w = G.edge_weight
         deg_new = 2 * deg[edge] - w
         L = torch.tensor([[deg_new[0], -w], [-w, deg_new[1]]])
         B = Pibot @ A[edge, :]
         return torch.linalg.norm(B.T @ L @ B)
 
     # edges = np.array(G.get_edge_list()[0:2])
-    edges = G.edge_index
-    weights = torch.tensor([subgraph_cost(G, A, edges[:, e]) for e in range(M)])
+    weights = torch.tensor(
+        [subgraph_cost(A, G.edge_index[:, e], G.edge_weight[e]) for e in range(M)]
+    )
     # weights = torch.zeros(M)
     # for e in range(M):
     #    weights[e] = subgraph_cost_old(G, A, edges[:,e])
@@ -1131,7 +1135,7 @@ def matching_optimal(edge_index, num_nodes, weights, r=0.4):
     # format output
     m = tmp.shape[0]
     matching = torch.zeros((m, 2), dtype=int)
-    matching[:, 0] = range(m)
+    matching[:, 0] = torch.arange(m)
     matching[:, 1] = tmp
 
     # remove null edges and duplicates
@@ -1158,6 +1162,7 @@ def matching_optimal(edge_index, num_nodes, weights, r=0.4):
     if keep < matching.shape[0]:
         idx = torch.argsort(matched_weights)[:keep]
         matching = matching[idx, :]
+        weights = matched_weights[idx]
 
     return matching
 
@@ -1190,7 +1195,6 @@ def matching_greedy(G: Data, weights, r=0.4, similarity_threshold=0.5):
 
     # the edge set
     edges = G.edge_index
-    M = edges.shape[1]
 
     idx = torch.argsort(-weights)
     # idx = np.argsort(weights)[::-1]
@@ -1206,6 +1210,7 @@ def matching_greedy(G: Data, weights, r=0.4, similarity_threshold=0.5):
     marked = torch.zeros(N, dtype=torch.bool)
 
     n, n_target = N, (1 - r) * N
+    count = 0
     while len(candidate_edges) > 0:
 
         # pop a candidate edge
@@ -1225,10 +1230,12 @@ def matching_greedy(G: Data, weights, r=0.4, similarity_threshold=0.5):
             n -= 1
 
             # add it to the matching
-            matching.append(torch.tensor([i, j]))
+            # matching.append(torch.tensor([i, j]))
+            matching.append({"list": [i, j], "similarity": sim, "cost": weights[count]})
 
+        count += 1
         # termination condition
         if n <= n_target:
             break
 
-    return torch.stack(matching)
+    return matching

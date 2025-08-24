@@ -24,7 +24,7 @@ from coarsening_aware_loss import *
 from create_coarsening_gif import create_coarsening_gif
 
 
-def train_GNN_coarsening_aware_loss2(
+def train_GNN_coarsening_aware_loss(
     data: Data,
     levels: int,
     epoch_per_level: int,
@@ -119,7 +119,9 @@ def train_GNN_coarsening_aware_loss2(
 
         for epoch in range(epoch_per_level):
             # train the GNN on the coarsened graph
-            C_train = C @ P_train
+            # C_train = C @ P_train
+            CC = C * C
+            C_train = CC @ P_train
             mask = torch.sum(C_train, dim=1).to_dense() > 1e-5
             train_idx_c = torch.nonzero(mask).view(-1)
             test_idx_c = torch.nonzero(~mask).view(-1)
@@ -144,7 +146,31 @@ def train_GNN_coarsening_aware_loss2(
             model, original_data, test_idx, log_info=False
         )
 
-        pred_fine = torch.argmax(C.t() @ pred, dim=1)
+        # Ct = CC.transpose(0, 1)
+        # CCt = torch.sparse.mm(CC, Ct).to_dense()  # (n_coarse, n_coarse)
+        # eps = 1e-6
+        # CCt_reg = CCt + eps * torch.eye(CCt.size(0), device=CCt.device)
+        # # Prefer Cholesky (SPD) over explicit inverse
+        # try:
+        #     L = torch.linalg.cholesky(CCt_reg)
+        #     # Solve (C C^T) X = pred  -> X = (C C^T)^{-1} pred
+        #     X = torch.cholesky_solve(pred, L)
+        # except RuntimeError:
+        #     # Fallback to generic solve (in case not SPD)
+        #     X = torch.linalg.solve(CCt_reg, pred)
+        # # C^{+} @ pred = C^T X
+        # pred_fine_ = torch.sparse.mm(Ct, X)
+        # pred_fine = torch.argmax(pred_fine_, dim=1)
+
+        # pred_fine_ = min_norm_lstsq_sparse_multi(CC, pred, lam=1e-6, tol=1e-8)
+        # pred_fine = torch.argmax(pred_fine_, dim=1)
+
+        C_plus = torch.sparse_coo_tensor(
+            torch.flip(CC.indices(), dims=[0]),
+            torch.ones_like(CC.values()),
+            (CC.size(1), CC.size(0)),
+        )
+        pred_fine = torch.argmax(C_plus @ pred, dim=1)
 
         accuracy_fine = torch.sum(
             pred_fine[test_idx] == original_data.y[test_idx]
@@ -207,13 +233,15 @@ def train_GNN_coarsening_aware_loss2(
             "ycrs": ycrs,
             "yfine": yfine,
             "ylosst": ylosst,
-            "Gall": Gall,
-            "Call": Call,
+            # "Gall": Gall,
+            # "Call": Call,
             # "ylossv": ylossv,
             # "valacc": valacc,
             "num_nodes_coarse": num_nodes_coarse,
             "description": f"Data obtained using: {method=}, {similarity_threshold=}, CoarseningAwareLoss() levels approach",
         },
     )
+
+    return Gall, Call
 
     # plt.show()

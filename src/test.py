@@ -10,7 +10,7 @@ from graph_utils import *
 from coarsening_utils import *
 from utils.utils import *
 from utils.visualization import *
-from train_GNN_coarsening import train_GNN_coarsening_aware_loss2
+from train_GNN_coarsening import train_GNN_coarsening_aware_loss
 
 import warnings
 
@@ -22,7 +22,8 @@ G = dataset[0]  # Get the first graph object
 G.edge_index = to_undirected(G.edge_index)
 G.edge_weight = torch.ones(G.edge_index.size(1), device=G.edge_index.device)
 
-method = "variation_neighborhoods"
+method = "variation_edges"
+# method = "variation_neighborhoods"
 # epochs_per_lev = [1]
 # thresholds = [0.50]
 epochs_per_lev = [1, 2, 5, 10]
@@ -42,9 +43,9 @@ colors = [
 
 for ep_per_lev in epochs_per_lev:
     for threshold in thresholds:
-        train_GNN_coarsening_aware_loss2(
+        Gall, Call = train_GNN_coarsening_aware_loss(
             G,
-            levels=25,
+            levels=100,
             K=20,
             lr=0.01,
             epoch_per_level=ep_per_lev,
@@ -55,7 +56,7 @@ for ep_per_lev in epochs_per_lev:
         data = np.load(f"{save_path}{name}", allow_pickle=True).item()
         LOGGER.info(f"epochs: {ep_per_lev}, threshold: {threshold}")
         LOGGER.info(
-            f"nodes: {data['Gall'][-1].num_nodes}, edges: {data['Gall'][-1].num_edges}, coarse accuracy: {data['ycrs'][-1]:.4f}, fine accuracy: {data['yfine'][-1]:.4f}"
+            f"nodes: {Gall[-1].num_nodes}, edges: {Gall[-1].num_edges}, coarse accuracy: {data['ycrs'][-1]:.4f}, fine accuracy: {data['yfine'][-1]:.4f}"
         )
 
     # same ratio and method in the same graph
@@ -87,7 +88,6 @@ for ep_per_lev in epochs_per_lev:
     plt.legend()
     plt.savefig(f"{save_path}/iterative_custom_loss_accuracy_{ep_per_lev}.png")
 
-    LOGGER.info(f"Epochs per Level: {ep_per_lev}")
     plt.figure(figsize=(16, 9))
     for idx, threshold in enumerate(thresholds):
         name = f"data_gnn_CoarseningAwareLoss_V2_th_{threshold*100:.0f}_epochs_{ep_per_lev}.npy"
