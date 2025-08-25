@@ -20,7 +20,7 @@ save_path = f"{result_path}{now}/"
 
 os.makedirs(save_path, exist_ok=True)
 LOGGER = getLOGGER(
-    name=f"{now}_Cora",
+    name=f"{now}_AMLGentex",
     log_on_file=True,
     save_path=save_path,
 )
@@ -75,8 +75,8 @@ def degree(edge_index, num_nodes, edge_weights=None):
     deg = torch.zeros(num_nodes, dtype=torch.float32)
     if edge_weights is not None:
         for i, j, w in zip(edge_index[0], edge_index[1], edge_weights):
-            deg[i] += w
-            deg[j] += w
+            deg[i] += w.item()
+            deg[j] += w.item()
     else:
         for i, j in zip(edge_index[0], edge_index[1]):
             deg[i] += 1
@@ -124,7 +124,7 @@ def create_P(indices, n, device="cpu"):
     P_indices = torch.stack(
         [
             indices,  # Column indices
-            torch.arange(n_t, device=device),  # Row indices
+            torch.arange(n_t),  # Row indices
         ]
     )
     P_values = torch.ones(n_t, device=device)
