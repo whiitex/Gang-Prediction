@@ -668,6 +668,7 @@ def contract_variation_linear(
     """
 
     N, deg, W_lil = G.num_nodes, degree(G.edge_index, G.num_nodes, G.edge_weight), G.W
+    deg = deg.to(W_lil.device)
 
     # The following is correct only for a single level of coarsening.
 
@@ -786,7 +787,8 @@ def contract_variation_linear(
             continue
 
         # check if marked
-        i_marked = marked[i_set]
+        isetcpu = i_set.cpu()
+        i_marked = marked[isetcpu]
 
         if not any(i_marked):
 
