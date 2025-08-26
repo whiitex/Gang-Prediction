@@ -145,7 +145,7 @@ def coarse_one_level(
         elif algorithm == "greedy":
             coarsening_list = matching_greedy(G, weights=weights, r=r_cur)
 
-    iC = get_coarsening_matrix(coarsening_list, G.num_nodes)
+    iC = get_coarsening_matrix(coarsening_list, G.num_nodes).to(G.L.device)
 
     Gc = construct_G(G, iC)
 
@@ -161,7 +161,7 @@ def calc_B(Gc, K, Uk=None, lk=None):
         B = Uk[:, :K] @ torch.diag(lsinv[:K])
     else:
         offset = 2 * max(Gc.dw)
-        T = offset * sparse_eye(Gc.num_nodes) - Gc.L
+        T = offset * sparse_eye(Gc.num_nodes, Gc.L.device) - Gc.L
         # lk, Uk = torch.linalg.eigh(T, k=K, which="LM", tol=1e-5)
         lk, Uk = torch.lobpcg(T, k=K, largest=True, tol=1e-5)
         lk = torch.flip(offset - lk, [0])
@@ -189,6 +189,7 @@ def construct_G(G: Data, iC: SparseTensor):
     indices = Wc.indices()
     values = Wc.values()
     num_nodes = Wc.size(0)
+    
     # x = torch.sparse.mm(iC, G.x) if G.x is not None else None
     x = coarsen_vector(G.x, iC) if G.x is not None else None
     Gc = Data(x=x, edge_index=indices, edge_weight=values, num_nodes=num_nodes)
@@ -216,12 +217,12 @@ def construct_G(G: Data, iC: SparseTensor):
 
 def coarsen_matrix(W, C):
     # Pinv = C.T; #Pinv[Pinv>0] = 1
-    C_sum = torch.sparse.sum(C, dim=0).to_dense()
+    C_sum = torch.sparse.sum(C, dim=0).to_dense().to(W.device)
     inv_C_sum = 1.0 / C_sum
     # Create sparse diagonal matrix
-    indices = torch.arange(len(inv_C_sum)).repeat(2, 1)
+    indices = torch.arange(len(inv_C_sum)).repeat(2, 1).to(W.device)
     D = torch.sparse_coo_tensor(indices, inv_C_sum, (len(inv_C_sum), len(inv_C_sum)))
-    Pinv = torch.sparse.mm(C, D).t()
+    Pinv = torch.sparse.mm(C, D).t().to(W.device)
     return torch.sparse.mm(torch.sparse.mm(Pinv.T, W), Pinv)
     # return (Pinv.T).dot(W.dot(Pinv))
 
@@ -618,11 +619,12 @@ def contract_variation_edges(
     """
     N, deg, M = (
         G.num_nodes,
-        degree(G.edge_index, G.num_nodes, G.edge_weight),
+        degree(G.edge_index, G.num_nodes, G.edge_weight).to(G.W.device),
         G.num_edges,
     )
     ones = torch.ones(2)
     Pibot = torch.eye(2) - torch.outer(ones, ones) / 2
+    Pibot = Pibot.to(A.device)
 
     # cost function for the edge
     def subgraph_cost(A, edge, w):
@@ -630,7 +632,7 @@ def contract_variation_edges(
         # edge = G.edge_index
         # w = G.edge_weight
         deg_new = 2 * deg[edge] - w
-        L = torch.tensor([[deg_new[0], -w], [-w, deg_new[1]]])
+        L = torch.tensor([[deg_new[0], -w], [-w, deg_new[1]]], device=A.device)
         B = Pibot @ A[edge, :]
         return torch.linalg.norm(B.T @ L @ B)
 
@@ -769,6 +771,14 @@ def contract_variation_linear(
 
     family = SortedList(family)
     marked = torch.zeros(G.num_nodes, dtype=torch.bool)
+
+    import matplotlib.pyplot as plt
+    costs = [c.cost.item() if torch.is_tensor(c.cost) else c.cost for c in family]
+    plt.figure()
+    plt.hist(costs, bins=100)
+    plt.show()
+
+
 
     # ----------------------------------------------------------------------------
     # Construct a (minimum weight) independent set.
@@ -1213,6 +1223,8 @@ def matching_greedy(G: Data, weights, r=0.4, similarity_threshold=0.5):
 
     n, n_target = N, (1 - r) * N
     count = 0
+
+
     while len(candidate_edges) > 0:
 
         # pop a candidate edge

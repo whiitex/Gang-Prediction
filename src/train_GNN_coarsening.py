@@ -19,7 +19,7 @@ from graph_utils import *
 from utils.utils import *
 from utils.visualization import *
 
-from GNN_model import GCN, train_gnn_1_epoch, evaluate_model
+from GNN_model import GCN, GCN_aml, train_gnn_1_epoch, evaluate_model
 from coarsening_aware_loss import *
 from create_coarsening_gif import create_coarsening_gif
 
@@ -41,8 +41,9 @@ def train_GNN_coarsening_aware_loss(
     create_gif=True,
 ):
     # model
+    device = data.x.device
     N = data.num_nodes  # 2708
-    nclass = len(np.unique(data.y.numpy()))  # 7
+    nclass = len(torch.unique(data.y))  # 7
     model = GCN(nfeat=data.num_features, nhid=nhid, nclass=nclass, dropout=dropout).to(
         device
     )
@@ -54,7 +55,6 @@ def train_GNN_coarsening_aware_loss(
     P_train = create_P(train_idx, N, device=device)
     P_val = create_P(val_idx, N, device=device)
     P_test = create_P(test_idx, N, device=device)
-
     # criterion
     criterion = CoarseningAwareLoss()
 
@@ -80,7 +80,7 @@ def train_GNN_coarsening_aware_loss(
     Gc.soft_y = labels_onehot
 
     ################################
-    C = sparse_eye(N)
+    C = sparse_eye(N, device)
     Gc.W, Gc.L, Gc.dw = graph_params(Gc)
     GG = to_networkx(Gc, to_undirected=True)
     pos = nx.spring_layout(GG)
@@ -112,6 +112,7 @@ def train_GNN_coarsening_aware_loss(
             level=level,
             r_cur=ratio,
         )
+        
         C = torch.sparse.mm(iC, C)
         Gall.append(Gc)
         Call.append(C)

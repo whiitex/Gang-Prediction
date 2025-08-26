@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore")
 
 # Create a Planetoid dataset
 dataset = Planetoid(root="data/Planetoid", name="Cora")
-G = dataset[0]  # Get the first graph object
+G = dataset[0].to(device)  # Get the first graph object
 G.edge_index = to_undirected(G.edge_index)
 G.edge_weight = torch.ones(G.edge_index.size(1), device=G.edge_index.device)
 

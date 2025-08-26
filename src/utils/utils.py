@@ -20,7 +20,8 @@ save_path = f"{result_path}{now}/"
 
 os.makedirs(save_path, exist_ok=True)
 LOGGER = getLOGGER(
-    name=f"{now}_AMLGentex",
+    # name=f"{now}_AMLGentex",
+    name=f"{now}_Cora",
     log_on_file=True,
     save_path=save_path,
 )
@@ -72,11 +73,11 @@ def create_train_val_test_split(num_nodes, train_ratio=0.6, val_ratio=0.2):
 
 
 def degree(edge_index, num_nodes, edge_weights=None):
-    deg = torch.zeros(num_nodes, dtype=torch.float32)
+    deg = torch.zeros(num_nodes, dtype=torch.float32).to(edge_index.device)
     if edge_weights is not None:
         for i, j, w in zip(edge_index[0], edge_index[1], edge_weights):
-            deg[i] += w.item()
-            deg[j] += w.item()
+            deg[i] += w
+            deg[j] += w
     else:
         for i, j in zip(edge_index[0], edge_index[1]):
             deg[i] += 1
@@ -84,10 +85,10 @@ def degree(edge_index, num_nodes, edge_weights=None):
     return deg
 
 
-def sparse_eye(size):
+def sparse_eye(size, device="cpu"):
     indices = torch.arange(size).repeat(2, 1)
     values = torch.ones(size)
-    C = torch.sparse_coo_tensor(indices, values, (size, size))
+    C = torch.sparse_coo_tensor(indices, values, (size, size), device=device)
     return C
 
 
