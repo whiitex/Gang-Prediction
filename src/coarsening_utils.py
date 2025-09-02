@@ -194,6 +194,12 @@ def construct_G(G: Data, iC: SparseTensor):
     Gc = Data(x=x, edge_index=indices, edge_weight=values, num_nodes=num_nodes)
     # Gc.soft_y = torch.sparse.mm(iC, G.soft_y) if G.soft_y is not None else None
     Gc.soft_y = coarsen_vector(G.soft_y, iC) if G.soft_y is not None else None
+    Gc.y = torch.argmax(Gc.soft_y, dim=1) if Gc.soft_y is not None else Gc.y
+    Gc.y_train = coarsen_vector(G.y_train, iC) if G.y_train is not None else None
+    s = Gc.y_train.sum(1)
+    Gc.train_idx = s.nonzero().view(-1) if Gc.y_train is not None else None
+    Gc.test_idx = s.eq(0).nonzero().view(-1) if Gc.y_train is not None else None
+
     Gc.W, Gc.L, Gc.dw = graph_params(Gc)
 
     embeddings = (
@@ -603,6 +609,56 @@ def plot_coarsening_evolution(Gall, Call, save_path=None, **kwargs):
 ################################################################################
 # Variation-based contraction algorithms
 ################################################################################
+
+
+def contract_variation_embeddings(
+    G: Data, A=None, K=10, r=0.5, algorithm="greedy", similarity_threshold=0.5
+):
+    """
+    Sequential contraction with local variation and edge-based families.
+    This is a specialized implementation for the edge-based family, that works
+    slightly faster than the contract_variation() function, which works for
+    any family.
+
+    See contract_variation() for documentation.
+    """
+    N, deg, M = (
+        G.num_nodes,
+        degree(G.edge_index, G.num_nodes, G.edge_weight),
+        G.num_edges,
+    )
+    ones = torch.ones(2)
+    Pibot = torch.eye(2) - torch.outer(ones, ones) / 2
+
+    # cost function for the edge
+    def subgraph_cost(A, edge, w):
+        # edge, w = edge[:2].astype(torch.int64), edge[2]
+        # edge = G.edge_index
+        # w = G.edge_weight
+        deg_new = 2 * deg[edge] - w
+        L = torch.tensor([[deg_new[0], -w], [-w, deg_new[1]]])
+        B = Pibot @ A[edge, :]
+        return torch.linalg.norm(B.T @ L @ B)
+
+    # edges = np.array(G.get_edge_list()[0:2])
+    weights = torch.tensor(
+        [subgraph_cost(A, G.edge_index[:, e], G.edge_weight[e]) for e in range(M)]
+    )
+    # weights = torch.zeros(M)
+    # for e in range(M):
+    #    weights[e] = subgraph_cost_old(G, A, edges[:,e])
+
+    if algorithm == "optimal":
+        # identify the minimum weight matching
+        coarsening_list = matching_optimal(G, weights=weights, r=r)
+
+    elif algorithm == "greedy":
+        # find a heavy weight matching
+        coarsening_list = matching_greedy(
+            G, weights=-weights, r=r, similarity_threshold=similarity_threshold
+        )
+
+    return coarsening_list
 
 
 def contract_variation_edges(

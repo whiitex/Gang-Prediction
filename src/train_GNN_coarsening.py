@@ -24,6 +24,43 @@ from coarsening_aware_loss import *
 from create_coarsening_gif import create_coarsening_gif
 
 
+def train_GNN(
+    data,
+    epochs,
+    lr=0.01,
+    wd=5e-4,
+    nhid=128,
+    dropout=0.1,
+    device="cpu",
+):
+    # model
+    nclass = len(np.unique(data.y.numpy()))  # 7
+    model = GCN(nfeat=data.num_features, nhid=nhid, nclass=nclass, dropout=dropout).to(
+        device
+    )
+    # criterion
+    criterion = CoarseningAwareLoss()
+
+    # train data
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+
+    bar = tqdm(total=epochs)
+    for epoch in range(epochs):
+        train_loss, train_acc = train_gnn_1_epoch(
+            model,
+            optimizer,
+            criterion,
+            data,
+            coarse_loss=False,
+        )
+        bar.set_postfix_str(
+            f"Epoch {epoch + 1}/{epochs}, Loss: {train_loss:.4f}, Accuracy: {train_acc:.4f}"
+        )
+        bar.update(1)
+
+    return model
+
+
 def train_GNN_coarsening_aware_loss(
     data: Data,
     levels: int,
@@ -46,20 +83,31 @@ def train_GNN_coarsening_aware_loss(
     model = GCN(nfeat=data.num_features, nhid=nhid, nclass=nclass, dropout=dropout).to(
         device
     )
-
-    original_data = data
-    Gc = data
-
-    train_idx, val_idx, test_idx = create_train_val_test_split(original_data.num_nodes)
-    P_train = create_P(train_idx, N, device=device)
-    P_val = create_P(val_idx, N, device=device)
-    P_test = create_P(test_idx, N, device=device)
-
     # criterion
     criterion = CoarseningAwareLoss()
 
     # train data
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+
+    original_data = data
+    Gc = data
+
+    # Create one-hot encoding of labels
+    device = Gc.y.device
+    num_classes = len(torch.unique(Gc.y))
+
+    labels_onehot = torch.zeros(len(Gc.y), num_classes, device=device)
+    labels_onehot.scatter_(1, Gc.y.view(-1, 1), 1)
+    Gc.soft_y = labels_onehot
+
+    Gc.y_train = torch.zeros_like(Gc.soft_y)
+    Gc.y_train[Gc.train_idx, :] = Gc.soft_y[Gc.train_idx, :]
+
+    Gc.y_val = torch.zeros_like(Gc.soft_y)
+    Gc.y_val[Gc.val_idx, :] = Gc.soft_y[Gc.val_idx, :]
+
+    Gc.y_test = torch.zeros_like(Gc.soft_y)
+    Gc.y_test[Gc.test_idx, :] = Gc.soft_y[Gc.test_idx, :]
 
     x, ycrs, yfine, ylosst, ylossv, valacc, num_nodes_coarse = (
         [],
@@ -71,17 +119,8 @@ def train_GNN_coarsening_aware_loss(
         [],
     )
 
-    # Create one-hot encoding of labels
-    device = Gc.y.device
-    num_classes = len(torch.unique(Gc.y))
-
-    labels_onehot = torch.zeros(len(Gc.y), num_classes, device=device)
-    labels_onehot.scatter_(1, Gc.y.view(-1, 1), 1)
-    Gc.soft_y = labels_onehot
-
     ################################
     C = sparse_eye(N)
-    Gc.W, Gc.L, Gc.dw = graph_params(Gc)
     GG = to_networkx(Gc, to_undirected=True)
     pos = nx.spring_layout(GG)
     pos = [vals for vals in pos.values()]
@@ -97,8 +136,10 @@ def train_GNN_coarsening_aware_loss(
     bar = tqdm(total=levels)
     for level in range(1, levels + 1):
         ratio = np.log(level ** (4 / 3)) / 100 + 0.01
+        # ratio = 1
         # get embeddings from the GNN
-        embeddings = model.get_embeddings(Gc.x, Gc.W)
+        S_mp = Gc.S_mp if hasattr(Gc, "S_mp") else Gc.W
+        embeddings = model.get_embeddings(Gc.x, S_mp)
         Gc.embeddings = F.normalize(embeddings, p=2, dim=1)
 
         iC, Gc, B = coarse_one_level(
@@ -113,68 +154,42 @@ def train_GNN_coarsening_aware_loss(
             r_cur=ratio,
         )
         C = torch.sparse.mm(iC, C)
+        CC = C * C
+        C_plus = torch.sparse_coo_tensor(
+            torch.flip(CC.indices(), dims=[0]),
+            torch.ones_like(CC.values()),
+            (CC.size(1), CC.size(0)),
+        )
+
+        # Gc.S_mp = CC @ original_data.W @ C_plus
+
         Gall.append(Gc)
         Call.append(C)
         iCs.append(iC)
 
         for epoch in range(epoch_per_level):
             # train the GNN on the coarsened graph
-            # C_train = C @ P_train
-            CC = C * C
-            C_train = CC @ P_train
-            mask = torch.sum(C_train, dim=1).to_dense() > 1e-5
-            train_idx_c = torch.nonzero(mask).view(-1)
-            test_idx_c = torch.nonzero(~mask).view(-1)
-            y_soft_train = C_train @ original_data.soft_y[train_idx]
-            Gc.y_train = torch.argmax(y_soft_train, dim=1)
-            Gc.y = torch.argmax(Gc.soft_y, dim=1) if Gc.soft_y is not None else Gc.y
-
             train_loss, train_acc = train_gnn_1_epoch(
                 model,
                 optimizer,
                 criterion,
                 Gc,
-                train_idx_c,
+                C_plus,
+                original_data.y,
+                original_data.train_idx,
                 coarse_loss=epoch == 0,
             )
 
         # evaluate the model on the coarsened graph
-        acc_test_c, pred_test_c, pred = evaluate_model(
-            model, Gc, test_idx_c, log_info=False
-        )
-        acc_test, pred_test, _ = evaluate_model(
-            model, original_data, test_idx, log_info=False
-        )
+        acc_test_c, pred_test_c, logits = evaluate_model(model, Gc, log_info=False)
+        acc_test, pred_test, _ = evaluate_model(model, original_data, log_info=False)
 
-        # Ct = CC.transpose(0, 1)
-        # CCt = torch.sparse.mm(CC, Ct).to_dense()  # (n_coarse, n_coarse)
-        # eps = 1e-6
-        # CCt_reg = CCt + eps * torch.eye(CCt.size(0), device=CCt.device)
-        # # Prefer Cholesky (SPD) over explicit inverse
-        # try:
-        #     L = torch.linalg.cholesky(CCt_reg)
-        #     # Solve (C C^T) X = pred  -> X = (C C^T)^{-1} pred
-        #     X = torch.cholesky_solve(pred, L)
-        # except RuntimeError:
-        #     # Fallback to generic solve (in case not SPD)
-        #     X = torch.linalg.solve(CCt_reg, pred)
-        # # C^{+} @ pred = C^T X
-        # pred_fine_ = torch.sparse.mm(Ct, X)
-        # pred_fine = torch.argmax(pred_fine_, dim=1)
-
-        # pred_fine_ = min_norm_lstsq_sparse_multi(CC, pred, lam=1e-6, tol=1e-8)
-        # pred_fine = torch.argmax(pred_fine_, dim=1)
-
-        C_plus = torch.sparse_coo_tensor(
-            torch.flip(CC.indices(), dims=[0]),
-            torch.ones_like(CC.values()),
-            (CC.size(1), CC.size(0)),
-        )
-        pred_fine = torch.argmax(C_plus @ pred, dim=1)
+        pred_fine = torch.argmax(F.softmax(C_plus @ logits, dim=1), dim=1)
+        # pred_fine = torch.argmax(F.log_softmax(C_plus @ logits, dim=1), dim=1)
 
         accuracy_fine = torch.sum(
-            pred_fine[test_idx] == original_data.y[test_idx]
-        ).item() / len(test_idx)
+            pred_fine[original_data.test_idx] == original_data.y[original_data.test_idx]
+        ).item() / len(original_data.test_idx)
 
         bar.set_postfix_str(
             f"{epoch_per_level}/{similarity_threshold:0.2f}, r: {ratio:.2f}, nodes: {Gc.num_nodes} "
@@ -223,7 +238,7 @@ def train_GNN_coarsening_aware_loss(
     #         print(f"GIF saved to: {gif_path}")
     #     except Exception as e:
     #         print(f"Error creating GIF: {e}")
-    #         print("Continuing without GIF...")
+    #         print("Continuing without GIF..."
 
     name = f"data_gnn_CoarseningAwareLoss_V2_th_{similarity_threshold*100:.0f}_epochs_{epoch_per_level}.npy"
     np.save(

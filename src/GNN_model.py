@@ -21,7 +21,8 @@ class GCN(nn.Module):
         x = F.relu(self.conv1(x, edge_index))
         x = F.dropout(x, self.dropout, training=self.training)
         x = self.conv2(x, edge_index)
-        return F.log_softmax(x, dim=1)
+        return x
+        # return F.log_softmax(x, dim=1)
 
     def get_embeddings(self, x, edge_index):
         # x = x.to(next(self.parameters()).device)  # send x to the model's device
@@ -39,10 +40,10 @@ def train_gnn_1_epoch(
     optimizer: optim.Optimizer,
     criterion: nn.Module,
     data: Data,
-    # coarsening_matrix,
-    train_idx: list,
-    # val_idx: list,
-    coarse_loss: bool,
+    C_plus=None,
+    y=None,
+    train_idx: list = None,
+    coarse_loss: bool = False,
 ):
     """
     Output:
@@ -56,18 +57,27 @@ def train_gnn_1_epoch(
     model.train()
     optimizer.zero_grad()
 
-    output = model(data.x, data.W)
+    S_mp = data.S_mp if hasattr(data, "S_mp") else data.W
+    y = y if y is not None else data.y
+    train_idx = train_idx if train_idx is not None else data.train_idx
+
+    logits = model(data.x, S_mp)
+    if C_plus is not None:
+        pred_fine = F.softmax(C_plus @ logits, dim=1)
+        # pred_fine = F.log_softmax(C_plus @ logits, dim=1)
+    else:
+        pred_fine = F.softmax(logits, dim=1)
+        # pred_fine = F.log_softmax(logits, dim=1)
     # embeddings = model.get_embeddings(data.x, data.edge_index)
 
     # train
-    loss = criterion(
-        output, data.embeddings, data.y_train, train_idx, coarse_loss=coarse_loss
-    )
+    embeddings = data.embeddings if hasattr(data, "embeddings") else None
+    loss = criterion(pred_fine, y, train_idx, embeddings, coarse_loss=coarse_loss)
     loss.backward()
     optimizer.step()
     train_acc = accuracy_score(
-        data.y_train[train_idx].detach().cpu().numpy(),
-        output[train_idx].max(1)[1].detach().cpu().numpy(),
+        y[train_idx].detach().cpu().numpy(),
+        pred_fine[train_idx].max(1)[1].detach().cpu().numpy(),
     )
 
     # validate
@@ -83,16 +93,23 @@ def train_gnn_1_epoch(
     return loss.item(), train_acc
 
 
-def evaluate_model(model: nn.Module, data: Data, test_idx, log_info=True):
+def evaluate_model(model: nn.Module, data: Data, log_info=True):
     """Evaluate the model on test set."""
     model.eval()
-    data = data.to(next(model.parameters()).device)
+    # data = data.to(next(model.parameters()).device)
+    S_mp = data.S_mp if hasattr(data, "S_mp") else data.W
 
     with torch.no_grad():
-        output = model(data.x, data.W)
-        pred_test = output[test_idx].max(1)[1]
+        logits = model(data.x, S_mp)
+        output = F.softmax(logits, dim=1)
+        # output = F.log_softmax(logits, dim=1)
+        # if C_plus is not None:
+        #     pred_test = C_plus @ output
+        # else:
+        #     pred_test = output
+        pred_test = output[data.test_idx].max(1)[1]
         acc_test = accuracy_score(
-            data.y[test_idx].cpu().numpy(), pred_test.cpu().numpy()
+            data.y[data.test_idx].cpu().numpy(), pred_test.cpu().numpy()
         )
 
         if log_info:
@@ -100,8 +117,8 @@ def evaluate_model(model: nn.Module, data: Data, test_idx, log_info=True):
             print("\nClassification Report:")
             print(
                 classification_report(
-                    data.y[test_idx].cpu().numpy(), pred_test.cpu().numpy()
+                    data.y[data.test_idx].cpu().numpy(), pred_test.cpu().numpy()
                 )
             )
 
-    return acc_test, pred_test, output
+    return acc_test, pred_test, logits

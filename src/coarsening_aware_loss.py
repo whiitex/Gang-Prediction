@@ -1,10 +1,7 @@
-import random
-
 import torch
 
 # import numpy as np
 import torch.nn as nn
-import torch.nn.functional as F
 from torch_geometric.data import Data
 
 # graph coarsening - Loukas 2020
@@ -20,15 +17,16 @@ class CoarseningAwareLoss(nn.Module):
         """
         super().__init__()
         self.coarse_weight = coarse_weight
-        self.class_loss = nn.NLLLoss()
+        self.class_loss = nn.CrossEntropyLoss()
+        # self.class_loss = nn.NLLLoss()
 
     def forward(
         self,
         output: torch.Tensor,
-        embeddings: torch.Tensor,
         labels: torch.Tensor,
         # coarsening_matrix: torch.Tensor,
         train_idx: torch.Tensor,
+        embeddings: torch.Tensor,
         coarse_loss: bool = True,
     ):
         """
@@ -38,7 +36,6 @@ class CoarseningAwareLoss(nn.Module):
         coarsening_matrix: [Nc, N] coarsening matrix.
         train_idx: indices of coarsened nodes used for classification loss.
         """
-        N = embeddings.shape[0]
 
         # 1. Classification loss
         loss_cls = self.class_loss(output[train_idx], labels[train_idx])
@@ -53,6 +50,7 @@ class CoarseningAwareLoss(nn.Module):
 
         loss_coarse = -torch.mean(torch.sum(embeddings**2, dim=1))
         # count = 0
+        N = embeddings.shape[0]
 
         # Negative sampling
         n_sample = max(int(N * 0.1), 500)

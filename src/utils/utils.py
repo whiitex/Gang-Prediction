@@ -29,8 +29,9 @@ LOGGER = getLOGGER(
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-torch.manual_seed(1)
-np.random.seed(1)
+seed = 4
+torch.manual_seed(seed)
+np.random.seed(seed)
 
 
 def create_pyg_data(features, edges_idx, labels) -> Data:
