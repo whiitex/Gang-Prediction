@@ -13,7 +13,7 @@ import maxWeightMatching
 
 def coarsen(
     # G,
-    # X=None, # WHT: node features
+    # X=None, 
     Gc: Data,
     K=10,
     r=0.5,
@@ -145,7 +145,7 @@ def coarse_one_level(
         elif algorithm == "greedy":
             coarsening_list = matching_greedy(G, weights=weights, r=r_cur)
 
-    iC = get_coarsening_matrix(coarsening_list, G.num_nodes).to(G.L.device)
+    iC = get_coarsening_matrix(coarsening_list, G.num_nodes, G.L.device)
 
     Gc = construct_G(G, iC)
 
@@ -256,7 +256,7 @@ def lift_matrix(W, C):
     return torch.sparse.mm(torch.sparse.mm(P.T, W), P)
 
 
-def get_coarsening_matrix(partitioning, N):
+def get_coarsening_matrix(partitioning, N, device):
     """
     Create coarsening matrix C using sparse tensor operations.
 
@@ -273,7 +273,7 @@ def get_coarsening_matrix(partitioning, N):
         The coarsening matrix
     """
     # Create sparse identity matrix
-    C = sparse_eye(N)
+    C = sparse_eye(N).to(device)
 
     # Keep track of which rows to preserve
     rows_to_keep = torch.ones(N, dtype=torch.bool)
@@ -287,40 +287,40 @@ def get_coarsening_matrix(partitioning, N):
 
         # Convert subgraph to tensor if needed
         if not isinstance(subgraph, torch.Tensor):
-            subgraph = torch.tensor(subgraph)
+            subgraph = torch.tensor(subgraph, device=device)
 
         # Mark rows to remove
         rows_to_keep[subgraph[1:]] = False
 
         # Get representative node
-        rep_node = subgraph[0].item()
+        rep_node = subgraph[0]
 
         # Create new entries for the representative node
         rep_indices = torch.stack(
             [
-                torch.full((nc,), rep_node),  # Row indices (all rep_node)
+                torch.full((nc,), rep_node, device=device),  # Row indices (all rep_node)
                 subgraph,  # Column indices
             ]
         )
 
         rep_values = torch.full(
-            (nc,), 1.0 / torch.sqrt(torch.tensor(nc, dtype=torch.float32))
+            (nc,), 1.0 / torch.sqrt(torch.tensor(nc, dtype=torch.float32)), device=device
         )
 
         # Create sparse tensor for this update
-        update = torch.sparse_coo_tensor(rep_indices, rep_values, (N, N))
+        update = torch.sparse_coo_tensor(rep_indices, rep_values, (N, N), device=device)
 
         # Update the representative row
         # First zero out any existing entries in the row
-        mask_indices = torch.tensor([[rep_node], [rep_node]])
-        mask_values = torch.ones(1)
-        mask = torch.sparse_coo_tensor(mask_indices, mask_values, (N, N))
+        mask_indices = torch.tensor([[rep_node], [rep_node]], device=device)
+        mask_values = torch.ones(1, device=device)
+        mask = torch.sparse_coo_tensor(mask_indices, mask_values, (N, N), device=device)
 
         # Add the update to C
         C = C + update - mask
 
     # Keep only the rows that weren't contracted
-    keep_indices = torch.nonzero(rows_to_keep).squeeze()
+    keep_indices = torch.nonzero(rows_to_keep).squeeze().to(device)
 
     # Extract the values and indices from C
     C = C.coalesce()  # Ensure C is in COO format
@@ -333,13 +333,13 @@ def get_coarsening_matrix(partitioning, N):
     filtered_values = values[mask]
 
     # Map old row indices to new indices
-    row_map = torch.full((N,), -1, dtype=torch.long)
-    row_map[keep_indices] = torch.arange(len(keep_indices))
+    row_map = torch.full((N,), -1, dtype=torch.long, device=device)
+    row_map[keep_indices] = torch.arange(len(keep_indices), device=device)
     filtered_indices[0] = row_map[filtered_indices[0]]
 
     # Create the final sparse tensor
     C_final = torch.sparse_coo_tensor(
-        filtered_indices, filtered_values, (len(keep_indices), N)
+        filtered_indices, filtered_values, (len(keep_indices), N), device=device
     )
 
     return C_final
@@ -631,14 +631,32 @@ def contract_variation_edges(
         # edge, w = edge[:2].astype(torch.int64), edge[2]
         # edge = G.edge_index
         # w = G.edge_weight
+
         deg_new = 2 * deg[edge] - w
         L = torch.tensor([[deg_new[0], -w], [-w, deg_new[1]]], device=A.device)
+
+        # structural cost
         B = Pibot @ A[edge, :]
-        return torch.linalg.norm(B.T @ L @ B)
+        structural_cost = torch.linalg.norm(B.T @ L @ B)
+
+        # semantic cost
+        if hasattr(G, "embeddings") and G.embeddings is not None:
+
+            # Pi_C^{\perp} H for the two-node subgraph (edge)
+            Bh = Pibot @ G.embeddings[edge, :]
+
+            # compute || Pi_C^{\perp} H ||_{L_C}^2  = || B^T L B ||_F^2
+            semantic_cost = torch.linalg.norm(Bh.T @ L @ Bh)
+        else: semantic_cost = 0.0
+
+        return [structural_cost, semantic_cost, structural_cost + semantic_cost]
+
 
     # edges = np.array(G.get_edge_list()[0:2])
     weights = torch.tensor(
-        [subgraph_cost(A, G.edge_index[:, e], G.edge_weight[e]) for e in range(M)]
+        # [subgraph_cost(A, G.edge_index[:, e], G.edge_weight[e]) for e in range(M)]
+        [subgraph_cost(A, G.edge_index[:, e], G.edge_weight[e])[2] for e in range(M)] # both
+        # [subgraph_cost(A, G.edge_index[:, e], G.edge_weight[e])[1] for e in range(M)] # only semantic cost
     )
     # weights = torch.zeros(M)
     # for e in range(M):
@@ -657,7 +675,6 @@ def contract_variation_edges(
     return coarsening_list
 
 
-# TODO(WHT): include features for each node
 def contract_variation_linear(
     G: Data, A, r=0.5, mode="neighborhood", similarity_threshold=0.5
 ):
@@ -669,8 +686,7 @@ def contract_variation_linear(
     See contract_variation() for documentation.
     """
 
-    N, deg, W_lil = G.num_nodes, degree(G.edge_index, G.num_nodes, G.edge_weight), G.W
-    deg = deg.to(W_lil.device)
+    N, deg = G.num_nodes, degree(G.edge_index, G.num_nodes, G.edge_weight).to(G.W.device)
 
     # The following is correct only for a single level of coarsening.
 
@@ -678,27 +694,24 @@ def contract_variation_linear(
     def subgraph_cost(nodes):
         if not isinstance(nodes, torch.Tensor):
             nodes = torch.tensor(nodes, dtype=torch.long)
+        
         nc = len(nodes)
-        if nc <= 1:
-            return 0.0
+        if nc <= 1: return 0.0
 
         # Create a sparse permutation matrix P
         # P will be of size nc x N where nc = len(nodes)
         # P[i,j] = 1 if j is the i-th node in 'nodes', otherwise 0
         P_indices = torch.stack(
             [
-                torch.arange(nc, device=W_lil.device),  # Row indices
+                torch.arange(nc, device=G.W.device),  # Row indices
                 nodes,  # Column indices
             ]
         )
-        P_values = torch.ones(nc, device=W_lil.device)
-        P = torch.sparse_coo_tensor(P_indices, P_values, (nc, N), device=W_lil.device)
+        P_values = torch.ones(nc, device=G.W.device)
+        P = torch.sparse_coo_tensor(P_indices, P_values, (nc, N), device=G.W.device)
 
-        # Extract the subgraph weight matrix using P @ W_lil @ P.T
-        # First compute P @ W_lil
-        PW = torch.sparse.mm(P, W_lil)
-        # Then compute (P @ W_lil) @ P.T
-        W_sub = torch.sparse.mm(PW, P.t())
+        # Extract the subgraph weight matrix using P @ G.W @ P.T
+        W_sub = torch.sparse.mm(torch.sparse.mm(P, G.W), P.t())
 
         # Compute subgraph degree vector
         d_sub = torch.sparse.sum(W_sub, dim=1).to_dense()
@@ -706,10 +719,10 @@ def contract_variation_linear(
         # Create Laplacian using original degrees and subgraph connections
         diag_values = 2 * deg[nodes] - d_sub
         L_diag = torch.sparse_coo_tensor(
-            torch.stack([torch.arange(nc, device=W_lil.device)] * 2),
+            torch.stack([torch.arange(nc, device=G.W.device)] * 2),
             diag_values,
             (nc, nc),
-            device=W_lil.device,
+            device=G.W.device,
         )
         L = L_diag - W_sub
 
@@ -717,7 +730,7 @@ def contract_variation_linear(
         A_sub = A[nodes, :]
 
         # Compute projection matrix
-        ones = torch.ones(nc, device=W_lil.device) / nc
+        ones = torch.ones(nc, device=G.W.device) / nc
         P_A_sub = A_sub - torch.outer(ones, torch.sum(A_sub, dim=0))
 
         # Compute the final cost
@@ -726,7 +739,8 @@ def contract_variation_linear(
         else:
             L_P_A = L @ P_A_sub
 
-        return torch.norm(P_A_sub.t() @ L_P_A) / (nc - 1)
+        structural_cost = torch.norm(P_A_sub.t() @ L_P_A) / (nc - 1)
+        return structural_cost
 
     class CandidateSet:
         def __init__(self, candidate_list):
@@ -771,13 +785,6 @@ def contract_variation_linear(
 
     family = SortedList(family)
     marked = torch.zeros(G.num_nodes, dtype=torch.bool)
-
-    import matplotlib.pyplot as plt
-    costs = [c.cost.item() if torch.is_tensor(c.cost) else c.cost for c in family]
-    plt.figure()
-    plt.hist(costs, bins=100)
-    plt.show()
-
 
 
     # ----------------------------------------------------------------------------

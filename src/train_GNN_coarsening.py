@@ -19,7 +19,7 @@ from graph_utils import *
 from utils.utils import *
 from utils.visualization import *
 
-from GNN_model import GCN, GCN_aml, train_gnn_1_epoch, evaluate_model
+from GNN_model import GCN, train_gnn_1_epoch, evaluate_model
 from coarsening_aware_loss import *
 from create_coarsening_gif import create_coarsening_gif
 
@@ -82,10 +82,10 @@ def train_GNN_coarsening_aware_loss(
     ################################
     C = sparse_eye(N, device)
     Gc.W, Gc.L, Gc.dw = graph_params(Gc)
-    GG = to_networkx(Gc, to_undirected=True)
-    pos = nx.spring_layout(GG)
-    pos = [vals for vals in pos.values()]
-    Gc.pos = torch.tensor(pos, dtype=torch.float32, device=device)
+    # GG = to_networkx(Gc, to_undirected=True)
+    # pos = nx.spring_layout(GG)
+    # pos = [vals for vals in pos.values()]
+    # Gc.pos = torch.tensor(pos, dtype=torch.float32, device=device)
 
     B = calc_B(Gc, K)
     iC = None
@@ -234,10 +234,10 @@ def train_GNN_coarsening_aware_loss(
             "ycrs": ycrs,
             "yfine": yfine,
             "ylosst": ylosst,
-            # "Gall": Gall,
-            # "Call": Call,
-            # "ylossv": ylossv,
-            # "valacc": valacc,
+            "Gall": Gall,
+            "Call": Call,
+            "ylossv": ylossv,
+            "valacc": valacc,
             "num_nodes_coarse": num_nodes_coarse,
             "description": f"Data obtained using: {method=}, {similarity_threshold=}, CoarseningAwareLoss() levels approach",
         },
