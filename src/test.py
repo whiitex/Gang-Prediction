@@ -30,6 +30,7 @@ G.val_idx = val_idx
 G.test_idx = test_idx
 G.W, G.L, G.dw = graph_params(G)
 
+# method = "variation_embedding"
 method = "variation_edges"
 # method = "variation_neighborhoods"
 # epochs_per_lev = [1]
@@ -85,7 +86,7 @@ for ep_per_lev in epochs_per_lev:
         Gall, Call = train_GNN_coarsening_aware_loss(
             G,
             levels=max_level,
-            K=50,
+            K=100,
             nhid=256,
             lr=0.005,
             wd=1e-3,

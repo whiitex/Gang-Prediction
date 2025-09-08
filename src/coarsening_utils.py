@@ -92,7 +92,6 @@ def coarsen(
 
 def coarse_one_level(
     G,
-    iC,
     B,
     K=10,
     method="variation_neighborhoods",
@@ -106,19 +105,26 @@ def coarse_one_level(
         if level == 1:
             A = B
         else:
-            B = torch.sparse.mm(iC, B)
+            B = torch.sparse.mm(G.C, B)
             d, V = torch.linalg.eigh(B.T @ G.L @ B)
-            mask = d == 0
-            d[mask] = 1
-            dinvsqrt = d ** (-1 / 2)
-            dinvsqrt[mask] = 0
-            A = B @ torch.diag(dinvsqrt) @ V
+            mask = d < 1e-10
+            d[mask] = 0
+            dinvsqrt = d ** (1 / 2)
+            # dinvsqrt[mask] = 0
+            A = B @ V @ torch.diag(dinvsqrt) @ V.T
 
         if method == "variation_edges":
             coarsening_list = contract_variation_edges(
                 G,
-                K=K,
                 A=A,
+                r=r_cur,
+                algorithm=algorithm,
+                similarity_threshold=similarity_threshold,
+            )
+        elif method == "variation_embedding":
+            coarsening_list = contract_variation_edges(
+                G,
+                A=G.embeddings,
                 r=r_cur,
                 algorithm=algorithm,
                 similarity_threshold=similarity_threshold,
@@ -149,27 +155,36 @@ def coarse_one_level(
 
     Gc = construct_G(G, iC)
 
-    return iC, Gc, B
+    return Gc, B
 
 
 def calc_B(Gc, K, Uk=None, lk=None):
     if (Uk is not None) and (lk is not None) and (len(lk) >= K):
         mask = lk < 1e-10
-        lk[mask] = 1
-        lsinv = lk ** (-0.5)
-        lsinv[mask] = 0
+        lk[mask] = 0
+        lsinv = lk ** (0.5)
+        # lsinv[mask] = 0
         B = Uk[:, :K] @ torch.diag(lsinv[:K])
     else:
-        offset = 2 * max(Gc.dw)
-        T = offset * sparse_eye(Gc.num_nodes) - Gc.L
-        # lk, Uk = torch.linalg.eigh(T, k=K, which="LM", tol=1e-5)
-        lk, Uk = torch.lobpcg(T, k=K, largest=True, tol=1e-5)
-        lk = torch.flip(offset - lk, [0])
-        Uk = torch.flip(Uk, [1])
-        mask = lk < 1e-10
-        lk[mask] = 1
-        lsinv = lk ** (-0.5)
-        lsinv[mask] = 0
+        # offset = 2 * max(Gc.dw)
+        # T = offset * sparse_eye(Gc.num_nodes) - Gc.L
+        # # lk, Uk = torch.linalg.eigh(T, k=K, which="LM", tol=1e-5)
+        # lk, Uk = torch.lobpcg(T, k=K, largest=True, tol=1e-5)
+        # lk = torch.flip(offset - lk, [0])
+        # Uk = torch.flip(Uk, [1])
+        # mask = lk < 1e-10
+        # lk[mask] = 1
+        # lsinv = lk ** (-0.5)
+        # lsinv[mask] = 0
+        # B = Uk @ torch.diag(lsinv)
+        d, V = torch.linalg.eigh(Gc.L.to_dense())
+        lk = d[:K]
+        Uk = V[:, :K]
+        # lk, Uk = torch.lobpcg(Gc.L, k=K, largest=False, tol=1e-5)
+        mask = lk < 0
+        lk[mask] = 0
+        lsinv = lk ** (0.5)
+        # lsinv[mask] = 0
         B = Uk @ torch.diag(lsinv)
 
     return B
@@ -181,17 +196,21 @@ def calc_B(Gc, K, Uk=None, lk=None):
 
 
 def construct_G(G: Data, iC: SparseTensor):
-    Wc = graph_utils.zero_diag(coarsen_matrix(G.W, iC))  # coarsen and remove self-loops
-    Wc = (
-        Wc + Wc.T
-    ) / 2  # this is only needed to avoid pygsp complaining for tiny errors
-    Wc = Wc.coalesce()  # Ensure Wc is in COO format
-    indices = Wc.indices()
-    values = Wc.values()
-    num_nodes = Wc.size(0)
+    C_plus = calc_C_plus(iC)
+    L = calc_L(G.L, C_plus)
+    # Extract diagonal of sparse Laplacian L (degrees) without densifying the whole matrix
+    W, dw = calc_W_deg(L)
+    indices = W.indices()
+    values = W.values()
+    num_nodes = W.size(0)
     # x = torch.sparse.mm(iC, G.x) if G.x is not None else None
     x = coarsen_vector(G.x, iC) if G.x is not None else None
     Gc = Data(x=x, edge_index=indices, edge_weight=values, num_nodes=num_nodes)
+    Gc.C = iC
+    Gc.C_plus = C_plus
+    Gc.L = L
+    Gc.dw = dw
+    Gc.W = W
     # Gc.soft_y = torch.sparse.mm(iC, G.soft_y) if G.soft_y is not None else None
     Gc.soft_y = coarsen_vector(G.soft_y, iC) if G.soft_y is not None else None
     Gc.y = torch.argmax(Gc.soft_y, dim=1) if Gc.soft_y is not None else Gc.y
@@ -200,7 +219,7 @@ def construct_G(G: Data, iC: SparseTensor):
     Gc.train_idx = s.nonzero().view(-1) if Gc.y_train is not None else None
     Gc.test_idx = s.eq(0).nonzero().view(-1) if Gc.y_train is not None else None
 
-    Gc.W, Gc.L, Gc.dw = graph_params(Gc)
+    # Gc.W, Gc.L, Gc.dw = graph_params(Gc)
 
     embeddings = (
         # torch.sparse.mm(iC, G.embeddings)
@@ -220,16 +239,48 @@ def construct_G(G: Data, iC: SparseTensor):
     return Gc
 
 
-def coarsen_matrix(W, C):
+def calc_C_plus(C):
     # Pinv = C.T; #Pinv[Pinv>0] = 1
-    C_sum = torch.sparse.sum(C, dim=0).to_dense()
+    C_sum = torch.sparse.sum(C * C, dim=1).to_dense()
     inv_C_sum = 1.0 / C_sum
     # Create sparse diagonal matrix
     indices = torch.arange(len(inv_C_sum)).repeat(2, 1)
     D = torch.sparse_coo_tensor(indices, inv_C_sum, (len(inv_C_sum), len(inv_C_sum)))
-    Pinv = torch.sparse.mm(C, D).t()
-    return torch.sparse.mm(torch.sparse.mm(Pinv.T, W), Pinv)
-    # return (Pinv.T).dot(W.dot(Pinv))
+    C_plus = torch.sparse.mm(C.t(), D)
+
+    return C_plus
+
+
+def calc_L(L, C_plus):
+    L_c = torch.sparse.mm(torch.sparse.mm(C_plus.t(), L), C_plus)
+    L_c = (
+        L_c + L_c.t()
+    ) / 2  # this is only needed to avoid pygsp complaining for tiny errors
+    return L_c
+
+
+def calc_W_deg(S):
+    if S.layout != torch.sparse_coo:
+        raise ValueError("Expected a sparse COO tensor")
+    S = S.coalesce()
+    n, m = S.shape
+    if n != m:
+        raise ValueError("Matrix must be square to extract a diagonal")
+    idx = S.indices()
+    vals = S.values()
+    mask = idx[0] == idx[1]
+    diag = torch.zeros(n, device=vals.device, dtype=vals.dtype)
+    if mask.any():
+        diag.index_add_(0, idx[0, mask], vals[mask])
+        non_diag_indices = idx[:, ~mask]
+        non_diag_values = -vals[~mask]
+        W = torch.sparse_coo_tensor(
+            non_diag_indices, non_diag_values, (n, n), device=vals.device
+        )
+    else:
+        W = torch.sparse_coo_tensor(idx, vals, (n, n), device=vals.device)
+
+    return W.coalesce(), diag
 
 
 def similarity(nodes_features):
@@ -239,26 +290,7 @@ def similarity(nodes_features):
 
 
 def coarsen_vector(x, C):
-    return (C * C) @ x
-
-
-def lift_vector(x, C):
-    # Pinv = C.T; Pinv[Pinv>0] = 1
-    C_sum = torch.sparse.sum(C, dim=0).to_dense()
-    inv_C_sum = 1.0 / C_sum
-    # Create sparse diagonal matrix
-    indices = torch.arange(len(inv_C_sum)).repeat(2, 1)
-    D = torch.sparse_coo_tensor(indices, inv_C_sum, (len(inv_C_sum), len(inv_C_sum)))
-    Pinv = torch.sparse.mm(C, D).t()
-    return torch.sparse.mm(Pinv, x)
-
-
-def lift_matrix(W, C):
-    # Get the squared version of C (equivalent to C.power(2) in scipy)
-    P = C * C  # Element-wise multiplication for sparse matrices in PyTorch
-
-    # Perform matrix multiplications with sparse matrices
-    return torch.sparse.mm(torch.sparse.mm(P.T, W), P)
+    return C @ x
 
 
 def get_coarsening_matrix(partitioning, N):
@@ -308,9 +340,7 @@ def get_coarsening_matrix(partitioning, N):
             ]
         )
 
-        rep_values = torch.full(
-            (nc,), 1.0 / torch.sqrt(torch.tensor(nc, dtype=torch.float32))
-        )
+        rep_values = torch.full((nc,), 1.0 / torch.tensor(nc, dtype=torch.float32))
 
         # Create sparse tensor for this update
         update = torch.sparse_coo_tensor(rep_indices, rep_values, (N, N))
@@ -624,7 +654,7 @@ def contract_variation_embeddings(
     """
     N, deg, M = (
         G.num_nodes,
-        degree(G.edge_index, G.num_nodes, G.edge_weight),
+        G.dw,
         G.num_edges,
     )
     ones = torch.ones(2)
@@ -662,7 +692,7 @@ def contract_variation_embeddings(
 
 
 def contract_variation_edges(
-    G: Data, A=None, K=10, r=0.5, algorithm="greedy", similarity_threshold=0.5
+    G: Data, A=None, r=0.5, algorithm="greedy", similarity_threshold=0.5
 ):
     """
     Sequential contraction with local variation and edge-based families.
@@ -674,7 +704,7 @@ def contract_variation_edges(
     """
     N, deg, M = (
         G.num_nodes,
-        degree(G.edge_index, G.num_nodes, G.edge_weight),
+        G.dw,
         G.num_edges,
     )
     ones = torch.ones(2)
@@ -682,9 +712,6 @@ def contract_variation_edges(
 
     # cost function for the edge
     def subgraph_cost(A, edge, w):
-        # edge, w = edge[:2].astype(torch.int64), edge[2]
-        # edge = G.edge_index
-        # w = G.edge_weight
         deg_new = 2 * deg[edge] - w
         L = torch.tensor([[deg_new[0], -w], [-w, deg_new[1]]])
         B = Pibot @ A[edge, :]
@@ -723,7 +750,7 @@ def contract_variation_linear(
     See contract_variation() for documentation.
     """
 
-    N, deg, W_lil = G.num_nodes, degree(G.edge_index, G.num_nodes, G.edge_weight), G.W
+    N, deg, W_lil = G.num_nodes, G.dw, G.W
 
     # The following is correct only for a single level of coarsening.
 

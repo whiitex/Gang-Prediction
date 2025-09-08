@@ -121,6 +121,7 @@ def train_GNN_coarsening_aware_loss(
 
     ################################
     C = sparse_eye(N)
+    C_plus = sparse_eye(N)
     GG = to_networkx(Gc, to_undirected=True)
     pos = nx.spring_layout(GG)
     pos = [vals for vals in pos.values()]
@@ -142,9 +143,8 @@ def train_GNN_coarsening_aware_loss(
         embeddings = model.get_embeddings(Gc.x, S_mp)
         Gc.embeddings = F.normalize(embeddings, p=2, dim=1)
 
-        iC, Gc, B = coarse_one_level(
+        Gc, B = coarse_one_level(
             Gc,
-            iC,
             B,
             K=K,
             method=method,
@@ -153,15 +153,8 @@ def train_GNN_coarsening_aware_loss(
             level=level,
             r_cur=ratio,
         )
-        C = torch.sparse.mm(iC, C)
-        CC = C * C
-        C_plus = torch.sparse_coo_tensor(
-            torch.flip(CC.indices(), dims=[0]),
-            torch.ones_like(CC.values()),
-            (CC.size(1), CC.size(0)),
-        )
-
-        # Gc.S_mp = CC @ original_data.W @ C_plus
+        C = torch.sparse.mm(Gc.C, C)
+        C_plus = torch.sparse.mm(C_plus, Gc.C_plus)
 
         Gall.append(Gc)
         Call.append(C)
