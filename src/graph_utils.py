@@ -1,8 +1,11 @@
+"""Small graph-theoretic helpers shared across coarsening code."""
+
 import numpy as np
 import torch
 
 
 def get_neighbors(G, i):
+    """Return neighbor indices for a pygsp graph node."""
     return G.A[i, :].indices
     # return np.arange(G.N)[np.array((G.W[i,:] > 0).todense())[0]]
 
@@ -28,6 +31,7 @@ def get_S(G):
 
 # Compare the spectum of L and Lc
 def eig(A, order="ascend"):
+    """Eigen-decompose a dense matrix and return (X, eigenvalues)."""
 
     # eigenvalue decomposition
     [l, X] = np.linalg.eigh(A)
@@ -44,6 +48,7 @@ def eig(A, order="ascend"):
 
 
 def zero_diag(A):
+    """Remove the diagonal from a dense or sparse matrix."""
     if hasattr(A, "is_sparse") and A.is_sparse:
         indices = A.indices()
         values = A.values()

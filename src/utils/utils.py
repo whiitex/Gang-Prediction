@@ -1,3 +1,5 @@
+"""Shared utilities for data prep, sparse ops, and graph algebra."""
+
 from datetime import datetime
 import os
 import torch
@@ -35,6 +37,7 @@ np.random.seed(seed)
 
 
 def create_pyg_data(features, edges_idx, labels) -> Data:
+    """Build a PyG Data object from numpy feature/edge/label arrays."""
     x = torch.FloatTensor(features.astype(np.float32))
     y = torch.LongTensor(labels)
     edge_index = torch.LongTensor(edges_idx.T)  # expects (2, num_edges)
@@ -44,6 +47,7 @@ def create_pyg_data(features, edges_idx, labels) -> Data:
 
 
 def create_pygsp_graph(data: Data) -> graphs.Graph:
+    """Convert a PyG graph into a pygsp Graph with Laplacian and layout."""
     # adjacency matrix
     adj_matrix = sp.sparse.coo_matrix(
         (np.ones(len(data.edge_index)), (data.edge_index[0], data.edge_index[1])),
@@ -61,6 +65,7 @@ def create_pygsp_graph(data: Data) -> graphs.Graph:
 
 
 def create_train_val_test_split(num_nodes, train_ratio=0.6, val_ratio=0.2):
+    """Randomly split node indices into train/val/test."""
     indices = torch.randperm(num_nodes)
     train_size = int(num_nodes * train_ratio)
     val_size = int(num_nodes * val_ratio)
@@ -73,6 +78,7 @@ def create_train_val_test_split(num_nodes, train_ratio=0.6, val_ratio=0.2):
 
 
 def degree(edge_index, num_nodes, edge_weights=None):
+    """Compute degree (optionally weighted) from edge index."""
     deg = torch.zeros(num_nodes, dtype=torch.float32)
     if edge_weights is not None:
         for i, j, w in zip(edge_index[0], edge_index[1], edge_weights):
@@ -86,6 +92,7 @@ def degree(edge_index, num_nodes, edge_weights=None):
 
 
 def sparse_eye(size):
+    """Create a sparse identity matrix."""
     indices = torch.arange(size).repeat(2, 1)
     values = torch.ones(size)
     C = torch.sparse_coo_tensor(indices, values, (size, size))
@@ -93,6 +100,7 @@ def sparse_eye(size):
 
 
 def graph_params(G: Data):
+    """Compute adjacency, Laplacian, and degree for a PyG graph."""
     num_nodes = G.num_nodes
     edge_index, edge_weight = remove_self_loops(G.edge_index, G.edge_weight)
 
@@ -121,6 +129,7 @@ def graph_params(G: Data):
 
 
 def create_P(indices, n, device="cpu"):
+    """Create a sparse selector matrix for a subset of nodes."""
     n_t = len(indices)
     P_indices = torch.stack(
         [
@@ -237,3 +246,53 @@ def min_norm_lstsq_sparse_multi(
     Z = _cg_multi(A_mv, Y, tol=tol, maxiter=maxiter, M=M)  # [m, d]
     X = _spmm(Ct, Z)  # [n, d]
     return X
+
+
+# ----------------------------
+# AX (and [X, AX, A^2X, ...])
+# ----------------------------
+def ax_stack(
+    A: torch.Tensor,
+    X: torch.Tensor,  # [N, d]
+    powers: int = 1,  # 1 -> AX; >1 -> [X, AX, ..., A^p X]
+) -> torch.Tensor:
+    """Stack powers of A times X for simple feature propagation."""
+    feats = [X] if powers > 1 else []
+    cur = X
+    for _ in range(powers):
+        cur = torch.sparse.mm(A, cur)  # [N, d]
+        feats.append(cur)
+    return torch.cat(feats, dim=1) if len(feats) > 1 else cur  # [N, k]
+
+
+# ----------------------------
+# L-orthonormal basis for span(AX)
+# B = Y (Y^T L Y)^{-1/2}
+# ----------------------------
+def inv_sqrt_psd(M: torch.Tensor, ridge: float = 1e-6) -> torch.Tensor:
+    """Compute a ridge-regularized inverse square root for PSD matrices."""
+    # symmetric PSD regularized inverse sqrt
+    e, U = torch.linalg.eigh(M + ridge * torch.eye(M.size(0), device=M.device))
+    e_clamped = torch.clamp(e, min=1e-12)
+    inv_sqrt = (e_clamped).rsqrt()
+    return (U * inv_sqrt) @ U.mH  # U diag(inv_sqrt) U^T
+
+
+def l_orthonormalize(
+    Y: torch.Tensor,  # [N, k]
+    L: torch.Tensor,  # sparse [N, N]
+    K: int,
+    ridge: float = 1e-6,
+) -> torch.Tensor:
+    """Return an L-orthonormal basis for the span of Y."""
+    d, V = torch.linalg.eigh(Y + ridge * torch.eye(Y.size(0), device=Y.device))
+    d = d[:K]
+    V = V[:, :K]
+    Yp = V @ torch.diag(d.sqrt())   # [N, K]
+    LY = torch.sparse.mm(L, Y)  # [N, k]
+    G = Y.mT @ LY  # [k, k]  (dense)
+    G_inv_sqrt = inv_sqrt_psd(G, ridge)
+    B = Y @ G_inv_sqrt  # [N, k]
+    # sanity check (optional):
+    # torch.testing.assert_close(B.mT @ torch.sparse.mm(L, B), torch.eye(B.size(1), device=B.device), atol=1e-3, rtol=1e-3)
+    return B

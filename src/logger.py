@@ -1,3 +1,5 @@
+"""Simple logger factory used by training/experiments."""
+
 import os
 import logging
 

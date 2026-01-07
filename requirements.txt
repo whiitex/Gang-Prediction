@@ -1,0 +1,35 @@
+# Core deep learning framework
+torch>=2.3.0
+torchvision>=0.18.0
+torchaudio>=2.3.0
+
+# PyTorch Geometric and extensions
+torch-geometric>=2.5.3
+torch-scatter>=2.1.2
+torch-sparse>=0.6.18
+torch-cluster>=1.6.3
+torch-spline-conv>=1.2.2
+
+# Scientific computing
+numpy>=1.26.4
+scipy>=1.13.1
+
+# Graph processing
+networkx>=3.1
+pygsp>=0.5.1
+
+# Machine learning utilities
+scikit-learn>=1.5.0
+
+# Data structures
+sortedcontainers>=2.4.0
+
+# Visualization
+matplotlib>=3.9.0
+
+# Progress bars
+tqdm>=4.67.0
+
+# Note: This project is configured to run with conda environment 'FedStruct'
+# Installation: conda env create -f environment.yml (if available)
+# or: pip install -r requirements.txt

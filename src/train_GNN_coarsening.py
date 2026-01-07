@@ -1,3 +1,5 @@
+"""Training entrypoints for the GNN baseline and the coarsening-aware variant."""
+
 import os
 import sys
 import numpy as np
@@ -17,11 +19,9 @@ from graph_utils import *
 
 # utils
 from utils.utils import *
-from utils.visualization import *
 
 from GNN_model import GCN, train_gnn_1_epoch, evaluate_model
 from coarsening_aware_loss import *
-from create_coarsening_gif import create_coarsening_gif
 
 
 def train_GNN(
@@ -33,6 +33,7 @@ def train_GNN(
     dropout=0.1,
     device="cpu",
 ):
+    """Train a vanilla GCN on the full-resolution graph."""
     # model
     nclass = len(np.unique(data.y.numpy()))  # 7
     model = GCN(nfeat=data.num_features, nhid=nhid, nclass=nclass, dropout=dropout).to(
@@ -77,6 +78,7 @@ def train_GNN_coarsening_aware_loss(
     # save_path="results",
     create_gif=True,
 ):
+    """Train a GCN across coarsening levels while applying a coarsening-aware loss."""
     # model
     N = data.num_nodes  # 2708
     nclass = len(np.unique(data.y.numpy()))  # 7
@@ -92,7 +94,7 @@ def train_GNN_coarsening_aware_loss(
     original_data = data
     Gc = data
 
-    # Create one-hot encoding of labels
+    # Create one-hot encoding of labels for soft label aggregation at coarse levels.
     device = Gc.y.device
     num_classes = len(torch.unique(Gc.y))
 
@@ -119,7 +121,7 @@ def train_GNN_coarsening_aware_loss(
         [],
     )
 
-    ################################
+    # Initialize coarsening matrices and a layout for visualization/debugging.
     C = sparse_eye(N)
     C_plus = sparse_eye(N)
     GG = to_networkx(Gc, to_undirected=True)
@@ -127,7 +129,10 @@ def train_GNN_coarsening_aware_loss(
     pos = [vals for vals in pos.values()]
     Gc.pos = torch.tensor(pos, dtype=torch.float32, device=device)
 
-    B = calc_B(Gc, K)
+    if method == "variation_embedding":
+        B = calc_B_embedding(Gc, K)
+    else:
+        B = calc_B(Gc, K)
     iC = None
 
     Call, Gall, iCs = [], [], []
@@ -135,6 +140,8 @@ def train_GNN_coarsening_aware_loss(
     # Call.append(C)
 
     bar = tqdm(total=levels)
+    prev_accuracy_fine = 0.0
+
     for level in range(1, levels + 1):
         ratio = np.log(level ** (4 / 3)) / 100 + 0.01
         # ratio = 1
@@ -183,6 +190,14 @@ def train_GNN_coarsening_aware_loss(
         accuracy_fine = torch.sum(
             pred_fine[original_data.test_idx] == original_data.y[original_data.test_idx]
         ).item() / len(original_data.test_idx)
+
+        # Adaptive coarsening: slow down if accuracy drops significantly
+        if level > 1 and (accuracy_fine < prev_accuracy_fine - 0.02):
+            ratio *= 0.7  # Reduce coarsening rate
+        elif level > 1 and accuracy_fine >= prev_accuracy_fine:
+            ratio = min(ratio * 1.1, 0.99)  # Can be more aggressive
+
+        prev_accuracy_fine = accuracy_fine
 
         bar.set_postfix_str(
             f"{epoch_per_level}/{similarity_threshold:0.2f}, r: {ratio:.2f}, nodes: {Gc.num_nodes} "

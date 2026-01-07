@@ -1,3 +1,5 @@
+"""GNN model definition and training/evaluation helpers."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,6 +20,7 @@ class GCN(nn.Module):
         self.dropout = dropout
 
     def forward(self, x, edge_index):
+        """Compute logits for each node."""
         x = F.relu(self.conv1(x, edge_index))
         x = F.dropout(x, self.dropout, training=self.training)
         x = self.conv2(x, edge_index)
@@ -25,9 +28,11 @@ class GCN(nn.Module):
         # return F.log_softmax(x, dim=1)
 
     def get_embeddings(self, x, edge_index):
+        """Return intermediate node embeddings (pre-classifier)."""
         # x = x.to(next(self.parameters()).device)  # send x to the model's device
         # edge_index = edge_index.to(x.device)
         x = F.relu(self.conv1(x, edge_index))
+        # x = F.relu(self.conv1(x, edge_index))
         return x
 
     def reset_parameters(self):
@@ -51,6 +56,7 @@ def train_gnn_1_epoch(
         - val_loss
         - val_accuracy
     """
+    # One training pass with optional coarse-to-fine projection.
 
     # data = data.to(next(model.parameters()).device)
 

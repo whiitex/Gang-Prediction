@@ -1,3 +1,5 @@
+"""Loss and helpers for training across coarsened graph levels."""
+
 import torch
 
 # import numpy as np
@@ -36,6 +38,7 @@ class CoarseningAwareLoss(nn.Module):
         coarsening_matrix: [Nc, N] coarsening matrix.
         train_idx: indices of coarsened nodes used for classification loss.
         """
+        # Combine classification loss with an embedding regularizer at coarse steps.
 
         # 1. Classification loss
         loss_cls = self.class_loss(output[train_idx], labels[train_idx])
@@ -49,16 +52,21 @@ class CoarseningAwareLoss(nn.Module):
         #         supernodes[j] = i
 
         loss_coarse = -torch.mean(torch.sum(embeddings**2, dim=1))
-        # count = 0
         N = embeddings.shape[0]
 
-        # Negative sampling
-        n_sample = max(int(N * 0.1), 500)
-        sampled_indices1 = torch.randint(0, N, (n_sample,))
-        sampled_indices2 = torch.randint(0, N, (n_sample,))
-        embeddings1 = embeddings[sampled_indices1]
-        embeddings2 = embeddings[sampled_indices2]
-        loss_coarse += torch.mean(torch.sum(embeddings1 * embeddings2, dim=1))
+        # Adaptive negative sampling (scales with graph size, capped for efficiency)
+        n_sample = min(max(int(N * 0.05), 100), 1000)
+
+        # Sample distinct pairs for better negative sampling
+        sampled_indices1 = torch.randint(0, N, (n_sample,), device=embeddings.device)
+        sampled_indices2 = torch.randint(0, N, (n_sample,), device=embeddings.device)
+
+        # Ensure we're sampling different nodes (avoid i==j)
+        mask = sampled_indices1 != sampled_indices2
+        if mask.sum() > 0:
+            embeddings1 = embeddings[sampled_indices1[mask]]
+            embeddings2 = embeddings[sampled_indices2[mask]]
+            loss_coarse += torch.mean(torch.sum(embeddings1 * embeddings2, dim=1))
         # for _ in range(n_sample):
         # i, j =
         # emb_i = embeddings[i]

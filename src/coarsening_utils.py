@@ -1,3 +1,6 @@
+"""Graph coarsening utilities based on variation-aware contractions."""
+
+import scipy
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -7,8 +10,8 @@ from torch_sparse import SparseTensor
 from sortedcontainers import SortedList
 
 from utils.utils import degree, graph_params, sparse_eye
-import graph_utils
 import maxWeightMatching
+from utils.utils import *
 
 
 def coarsen(
@@ -66,9 +69,8 @@ def coarsen(
     Gall.append(Gc)
 
     for level in range(1, max_levels + 1):
-        iC, Gc, B = coarse_one_level(
+        Gc, B = coarse_one_level(
             Gc,
-            iC,
             B,
             K=K,
             method=method,
@@ -100,6 +102,7 @@ def coarse_one_level(
     level=1,
     r_cur=None,
 ):
+    """Coarsen a single level using a variation-based or matching-based policy."""
 
     if "variation" in method:
         if level == 1:
@@ -108,9 +111,9 @@ def coarse_one_level(
             B = torch.sparse.mm(G.C, B)
             d, V = torch.linalg.eigh(B.T @ G.L @ B)
             mask = d < 1e-10
-            d[mask] = 0
-            dinvsqrt = d ** (1 / 2)
-            # dinvsqrt[mask] = 0
+            d[mask] = 1
+            dinvsqrt = d ** (-0.5)
+            dinvsqrt[mask] = 0
             A = B @ V @ torch.diag(dinvsqrt) @ V.T
 
         if method == "variation_edges":
@@ -124,7 +127,8 @@ def coarse_one_level(
         elif method == "variation_embedding":
             coarsening_list = contract_variation_edges(
                 G,
-                A=G.embeddings,
+                A=A,
+                # A=G.embeddings,
                 r=r_cur,
                 algorithm=algorithm,
                 similarity_threshold=similarity_threshold,
@@ -159,35 +163,59 @@ def coarse_one_level(
 
 
 def calc_B(Gc, K, Uk=None, lk=None):
+    """Compute the spectral basis used by variation-based coarsening."""
     if (Uk is not None) and (lk is not None) and (len(lk) >= K):
         mask = lk < 1e-10
-        lk[mask] = 0
+        lk[mask] = 1
         lsinv = lk ** (0.5)
-        # lsinv[mask] = 0
+        lsinv[mask] = 0
         B = Uk[:, :K] @ torch.diag(lsinv[:K])
     else:
-        # offset = 2 * max(Gc.dw)
-        # T = offset * sparse_eye(Gc.num_nodes) - Gc.L
-        # # lk, Uk = torch.linalg.eigh(T, k=K, which="LM", tol=1e-5)
-        # lk, Uk = torch.lobpcg(T, k=K, largest=True, tol=1e-5)
-        # lk = torch.flip(offset - lk, [0])
-        # Uk = torch.flip(Uk, [1])
-        # mask = lk < 1e-10
-        # lk[mask] = 1
-        # lsinv = lk ** (-0.5)
-        # lsinv[mask] = 0
-        # B = Uk @ torch.diag(lsinv)
-        d, V = torch.linalg.eigh(Gc.L.to_dense())
-        lk = d[:K]
-        Uk = V[:, :K]
-        # lk, Uk = torch.lobpcg(Gc.L, k=K, largest=False, tol=1e-5)
+        # Use sparse eigendecomposition for efficiency (10-100x faster than dense)
+        try:
+            # Initialize with random vectors for lobpcg
+            X_init = torch.randn(Gc.num_nodes, K, device=Gc.L.device)
+            lk, Uk = torch.lobpcg(Gc.L, k=K, X=X_init, largest=False, niter=200, tol=1e-4)
+        except Exception as e:
+            # Fallback to dense if lobpcg fails (e.g., very small graphs)
+            print(f"Warning: lobpcg failed ({e}), falling back to dense eigendecomposition")
+            d, V = torch.linalg.eigh(Gc.L.to_dense())
+            lk = d[:K]
+            Uk = V[:, :K]
+        
         mask = lk < 0
-        lk[mask] = 0
-        lsinv = lk ** (0.5)
-        # lsinv[mask] = 0
+        lk[mask] = 1
+        lsinv = lk ** (-0.5)
+        lsinv[mask] = 0
         B = Uk @ torch.diag(lsinv)
 
     return B
+
+
+def calc_B_embedding(Gc, K):
+    """Compute a smooth embedding basis from feature-propagated signals."""
+    # # Y = AX (or stack [X, AX, A^2 X])
+    # Y = ax_stack(Gc.W, Gc.x, powers=1)  # -> [N, d]
+    # # L-orthonormal basis of span(Y)
+    # B0 = l_orthonormalize(Y, Gc.L, ridge=1e-6)  # [N, k], k = rank(Y) (<= d)
+    # Given: sparse L, A, dense X (n x d), target k
+    Y = Gc.W @ Gc.x
+    YtY = Y.T @ Y
+    YtLY = Y.T @ (Gc.L @ Y)
+    Y = Y.cpu().detach().numpy()
+    YtLY = YtLY.cpu().detach().numpy()
+    YtY = YtY.cpu().detach().numpy()
+
+    eps = 1e-6
+    # Solve (Y^T L Y) v = lambda (Y^T Y + eps I) v
+    w, V = scipy.linalg.eigh(YtLY, YtY + eps * np.eye(YtY.shape[0]))
+    idx = np.argsort(w)[:K]  # k smallest lambdas (smoothest)
+    Vk = V[:, idx]
+    Z = Y @ Vk  # n x k
+    lam = w[idx]
+    B0 = Z @ np.diag(lam**-0.5)  # L-orthonormal basis in span(Y)
+    # -> use B0 in the p.16-style k×k updates at each coarsening level
+    return torch.tensor(B0, dtype=torch.float32, device=Gc.x.device)
 
 
 ################################################################################
@@ -196,6 +224,7 @@ def calc_B(Gc, K, Uk=None, lk=None):
 
 
 def construct_G(G: Data, iC: SparseTensor):
+    """Build a coarsened PyG Data graph from a coarsening matrix."""
     C_plus = calc_C_plus(iC)
     L = calc_L(G.L, C_plus)
     # Extract diagonal of sparse Laplacian L (degrees) without densifying the whole matrix
@@ -240,6 +269,7 @@ def construct_G(G: Data, iC: SparseTensor):
 
 
 def calc_C_plus(C):
+    """Compute the left pseudo-inverse of the coarsening matrix."""
     # Pinv = C.T; #Pinv[Pinv>0] = 1
     C_sum = torch.sparse.sum(C * C, dim=1).to_dense()
     inv_C_sum = 1.0 / C_sum
@@ -252,6 +282,7 @@ def calc_C_plus(C):
 
 
 def calc_L(L, C_plus):
+    """Project the Laplacian to the coarse space."""
     L_c = torch.sparse.mm(torch.sparse.mm(C_plus.t(), L), C_plus)
     L_c = (
         L_c + L_c.t()
@@ -260,6 +291,7 @@ def calc_L(L, C_plus):
 
 
 def calc_W_deg(S):
+    """Extract adjacency and degree diagonal from a sparse Laplacian."""
     if S.layout != torch.sparse_coo:
         raise ValueError("Expected a sparse COO tensor")
     S = S.coalesce()
@@ -284,12 +316,14 @@ def calc_W_deg(S):
 
 
 def similarity(nodes_features):
+    """Average pairwise similarity for a node feature block."""
     s = nodes_features @ nodes_features.T
     n = s.shape[0]
     return torch.sum(torch.triu(s, diagonal=1)) / ((n - 1) * n / 2)
 
 
 def coarsen_vector(x, C):
+    """Apply coarsening matrix to features or label probabilities."""
     return C @ x
 
 
@@ -309,6 +343,7 @@ def get_coarsening_matrix(partitioning, N):
     C : torch.sparse.Tensor
         The coarsening matrix
     """
+    # Start from identity and collapse rows for each contracted subgraph.
     # Create sparse identity matrix
     C = sparse_eye(N)
 

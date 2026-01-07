@@ -1,3 +1,5 @@
+"""Experiment driver for coarsening-aware training on Cora."""
+
 import os
 import sys
 import numpy as np
@@ -9,7 +11,6 @@ sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
 from graph_utils import *
 from utils.utils import *
 from coarsening_utils import *
-from utils.visualization import *
 from GNN_model import evaluate_model
 from train_GNN_coarsening import train_GNN_coarsening_aware_loss, train_GNN
 
@@ -30,8 +31,8 @@ G.val_idx = val_idx
 G.test_idx = test_idx
 G.W, G.L, G.dw = graph_params(G)
 
-# method = "variation_embedding"
-method = "variation_edges"
+method = "variation_embedding"
+# method = "variation_edges"
 # method = "variation_neighborhoods"
 # epochs_per_lev = [1]
 # thresholds = [0.50]
@@ -88,8 +89,8 @@ for ep_per_lev in epochs_per_lev:
             levels=max_level,
             K=100,
             nhid=256,
-            lr=0.005,
-            wd=1e-3,
+            lr=0.01,
+            wd=1e-4,
             epoch_per_level=ep_per_lev,
             method=method,
             similarity_threshold=threshold,
