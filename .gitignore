@@ -9,6 +9,9 @@ __pycache__
 src/train/federated_learning/results
 old
 *results/
+*data/
+
+
 
 # Experiments: Keep config files, ignore generated outputs
 experiments/*/spatial/
