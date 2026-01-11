@@ -1,0 +1,80 @@
+
+trial: 166
+values: [0.41434343434343435, 0.8635765258157309]
+mean_amount_sar: 707
+std_amount_sar: 299
+mean_outcome_sar: 487
+std_outcome_sar: 170
+prob_spend_cash: 0.15824337632156535
+mean_phone_change_frequency_sar: 1359
+std_phone_change_frequency_sar: 408
+mean_bank_change_frequency_sar: 1279
+std_bank_change_frequency_sar: 295
+prob_participate_in_multiple_sars: 0.003390783724653859
+mean_duration_alert: 27.63773892383428
+std_duration_alert: 9.25601072888244
+burstiness_bias_alert: -3.132277285914426
+
+trial: 181
+values: [0.3941414141414141, 0.8986718815454187]
+mean_amount_sar: 735
+std_amount_sar: 296
+mean_outcome_sar: 463
+std_outcome_sar: 107
+prob_spend_cash: 0.22683962602971924
+mean_phone_change_frequency_sar: 1403
+std_phone_change_frequency_sar: 449
+mean_bank_change_frequency_sar: 1449
+std_bank_change_frequency_sar: 328
+prob_participate_in_multiple_sars: 0.21264927549212592
+mean_duration_alert: 11.127803862959095
+std_duration_alert: 19.891725173016738
+burstiness_bias_alert: -0.5586444043727355
+
+trial: 192
+values: [0.40424242424242424, 0.8976131379085911]
+mean_amount_sar: 769
+std_amount_sar: 275
+mean_outcome_sar: 482
+std_outcome_sar: 102
+prob_spend_cash: 0.10137682697482467
+mean_phone_change_frequency_sar: 1380
+std_phone_change_frequency_sar: 448
+mean_bank_change_frequency_sar: 1432
+std_bank_change_frequency_sar: 292
+prob_participate_in_multiple_sars: 0.054982213706905037
+mean_duration_alert: 10.521205830391557
+std_duration_alert: 14.70372927755215
+burstiness_bias_alert: -1.2508455288661526
+
+trial: 256
+values: [0.35373737373737374, 1.0205281041467695]
+mean_amount_sar: 705
+std_amount_sar: 318
+mean_outcome_sar: 478
+std_outcome_sar: 185
+prob_spend_cash: 0.1732489015050235
+mean_phone_change_frequency_sar: 1319
+std_phone_change_frequency_sar: 418
+mean_bank_change_frequency_sar: 1297
+std_bank_change_frequency_sar: 312
+prob_participate_in_multiple_sars: 0.00208036006305555
+mean_duration_alert: 29.918859136003054
+std_duration_alert: 9.06476607806505
+burstiness_bias_alert: -3.4700833785746497
+
+trial: 291
+values: [0.384040404040404, 0.9683663626404756]
+mean_amount_sar: 858
+std_amount_sar: 325
+mean_outcome_sar: 582
+std_outcome_sar: 173
+prob_spend_cash: 0.48911934741463214
+mean_phone_change_frequency_sar: 1329
+std_phone_change_frequency_sar: 310
+mean_bank_change_frequency_sar: 1327
+std_bank_change_frequency_sar: 328
+prob_participate_in_multiple_sars: 0.035732814000180746
+mean_duration_alert: 27.29192432165434
+std_duration_alert: 13.599400772157697
+burstiness_bias_alert: 2.940575726589555

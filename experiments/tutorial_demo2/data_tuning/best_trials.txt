@@ -1,0 +1,80 @@
+
+trial: 3
+values: [0.19, 0.6782251537182598]
+mean_amount_sar: 602
+std_amount_sar: 333
+mean_outcome_sar: 489
+std_outcome_sar: 146
+prob_spend_cash: 0.2892953795841891
+mean_phone_change_frequency_sar: 1386
+std_phone_change_frequency_sar: 289
+mean_bank_change_frequency_sar: 1429
+std_bank_change_frequency_sar: 342
+prob_participate_in_multiple_sars: 0.4457851598600155
+mean_duration_alert: 13.345188976507238
+std_duration_alert: 8.110819277092883
+burstiness_bias_alert: 2.834354075655372
+
+trial: 47
+values: [0.2, 0.6683098908090707]
+mean_amount_sar: 638
+std_amount_sar: 282
+mean_outcome_sar: 581
+std_outcome_sar: 120
+prob_spend_cash: 0.25335295801274493
+mean_phone_change_frequency_sar: 1280
+std_phone_change_frequency_sar: 341
+mean_bank_change_frequency_sar: 1447
+std_bank_change_frequency_sar: 408
+prob_participate_in_multiple_sars: 0.4840640901448573
+mean_duration_alert: 10.65258723144576
+std_duration_alert: 6.6382936434197815
+burstiness_bias_alert: 3.7868460442157623
+
+trial: 56
+values: [0.21000000000000002, 0.6133904235872808]
+mean_amount_sar: 698
+std_amount_sar: 250
+mean_outcome_sar: 400
+std_outcome_sar: 107
+prob_spend_cash: 0.49900624352169404
+mean_phone_change_frequency_sar: 1436
+std_phone_change_frequency_sar: 310
+mean_bank_change_frequency_sar: 1375
+std_bank_change_frequency_sar: 410
+prob_participate_in_multiple_sars: 0.2518217860085183
+mean_duration_alert: 29.612210478315802
+std_duration_alert: 19.336726104232635
+burstiness_bias_alert: 3.6542151969067733
+
+trial: 71
+values: [0.22, 0.5918231442240373]
+mean_amount_sar: 673
+std_amount_sar: 276
+mean_outcome_sar: 396
+std_outcome_sar: 102
+prob_spend_cash: 0.4885964959732456
+mean_phone_change_frequency_sar: 1386
+std_phone_change_frequency_sar: 323
+mean_bank_change_frequency_sar: 1429
+std_bank_change_frequency_sar: 373
+prob_participate_in_multiple_sars: 0.2448114952741033
+mean_duration_alert: 27.382820753978866
+std_duration_alert: 19.48873256990481
+burstiness_bias_alert: 3.9204015255292846
+
+trial: 91
+values: [0.37, 0.5720595496333503]
+mean_amount_sar: 609
+std_amount_sar: 392
+mean_outcome_sar: 484
+std_outcome_sar: 160
+prob_spend_cash: 0.31405568076091983
+mean_phone_change_frequency_sar: 1390
+std_phone_change_frequency_sar: 342
+mean_bank_change_frequency_sar: 1428
+std_bank_change_frequency_sar: 350
+prob_participate_in_multiple_sars: 0.37406328187300003
+mean_duration_alert: 13.631080297965369
+std_duration_alert: 6.408563294707354
+burstiness_bias_alert: 1.0678664288417516

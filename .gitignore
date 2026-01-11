@@ -8,6 +8,7 @@ __pycache__
 *.pkl
 src/train/federated_learning/results
 old
+*results/
 
 # Experiments: Keep config files, ignore generated outputs
 experiments/*/spatial/
