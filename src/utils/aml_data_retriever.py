@@ -40,7 +40,7 @@ def load_aml_dataset(
         - ground_truth: torch.Tensor of shape (N, 1) - N is the number of nodes and the value is the label for each node
     """
 
-    allowed_names = ["easy", "hard", "1M"]
+    allowed_names = ["easy", "difficult", "1M"]
     if name not in allowed_names:
         raise ValueError(f"name must be one of {allowed_names}")
     

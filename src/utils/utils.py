@@ -27,7 +27,8 @@ LOGGER = getLOGGER(
 )
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = 'cpu'
 print(f"Using device: {device}")
 
 torch.manual_seed(1)
