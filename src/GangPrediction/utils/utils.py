@@ -108,9 +108,10 @@ def graph_params(G: Data):
         edge_weight = torch.ones(
             edge_index.size(1), dtype=torch.float32, device=edge_index.device
         )
+    # Use the de-looped edge_index (not G.edge_index) for the adjacency matrix
     W = torch.sparse_coo_tensor(
-        G.edge_index,
-        G.edge_weight,
+        edge_index,
+        edge_weight,
         size=(num_nodes, num_nodes),
         device=edge_index.device,
     )
@@ -296,3 +297,42 @@ def l_orthonormalize(
     # sanity check (optional):
     # torch.testing.assert_close(B.mT @ torch.sparse.mm(L, B), torch.eye(B.size(1), device=B.device), atol=1e-3, rtol=1e-3)
     return B
+
+
+def compute_class_weights(
+    labels: torch.Tensor, train_idx: torch.Tensor = None, device: str = "cpu"
+) -> torch.Tensor:
+    """
+    Compute class weights based on inverse frequency for handling class imbalance.
+
+    Args:
+        labels: Tensor of shape [N] with class labels
+        train_idx: Optional tensor of training indices. If provided, weights are computed
+                   only from training labels. Otherwise, uses all labels.
+        device: Device to place the weights tensor on
+
+    Returns:
+        Tensor of shape [num_classes] with class weights (higher weight for minority class)
+    """
+    if train_idx is not None:
+        train_labels = labels[train_idx]
+    else:
+        train_labels = labels
+
+    num_classes = len(torch.unique(labels))
+    class_counts = torch.zeros(num_classes, device=device)
+
+    for c in range(num_classes):
+        class_counts[c] = (train_labels == c).sum().float()
+
+    # Avoid division by zero
+    class_counts = torch.clamp(class_counts, min=1.0)
+
+    # Inverse frequency weighting
+    total = class_counts.sum()
+    class_weights = total / (num_classes * class_counts)
+
+    # Normalize so weights sum to num_classes (maintains loss scale)
+    class_weights = class_weights * num_classes / class_weights.sum()
+
+    return class_weights

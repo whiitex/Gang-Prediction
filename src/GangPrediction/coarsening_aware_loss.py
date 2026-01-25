@@ -4,7 +4,9 @@ import torch
 
 # import numpy as np
 import torch.nn as nn
+import torch.nn.functional as F
 from torch_geometric.data import Data
+from typing import Dict, List, Optional
 
 # graph coarsening - Loukas 2020
 from src.GangPrediction.coarsening_utils import *
@@ -12,84 +14,172 @@ from src.GangPrediction.graph_utils import *
 
 
 class CoarseningAwareLoss(nn.Module):
-    def __init__(self, coarse_weight: float = 1, class_weights: torch.Tensor = None):
+    def __init__(
+        self,
+        coarse_weight: float = 1.0,
+        class_weights: torch.Tensor = None,
+        alert_patterns: Dict[str, List[int]] = None,
+        normal_patterns: Dict[str, List[int]] = None,
+        pattern_margin: float = 1.0,
+        intra_weight: float = 1.0,
+        inter_weight: float = 1.0,
+    ):
         """
         Args:
-          coarse_weight: weight for the coarsening loss term.
+          coarse_weight: weight for the pattern contrastive loss term.
           class_weights: tensor of shape [num_classes] with class weights for handling imbalance.
                         If None, no class weighting is applied.
+          alert_patterns: Dict mapping pattern_id -> list of node indices for alert/malicious patterns.
+          normal_patterns: Dict mapping pattern_id -> list of node indices for normal patterns.
+          pattern_margin: Margin for contrastive loss (how far apart embeddings should be).
+          intra_weight: Weight for intra-pattern cohesion loss (pulling nodes within patterns together).
+          inter_weight: Weight for inter-pattern separation loss (pushing pattern nodes away from others).
         """
         super().__init__()
         self.coarse_weight = coarse_weight
         self.class_weights = class_weights
         self.class_loss = nn.CrossEntropyLoss(weight=class_weights)
-        # self.class_loss = nn.NLLLoss()
+        self.pattern_margin = pattern_margin
+        self.intra_weight = intra_weight
+        self.inter_weight = inter_weight
+
+        # Store patterns
+        self.alert_patterns = alert_patterns or {}
+        self.normal_patterns = normal_patterns or {}
+
+        # Precompute pattern node sets for efficiency
+        self._precompute_pattern_info()
+
+    def _precompute_pattern_info(self):
+        """Precompute pattern information for efficient loss computation."""
+        # Combine all patterns
+        all_patterns = {}
+        all_patterns.update(self.alert_patterns)
+        all_patterns.update(self.normal_patterns)
+
+        self.all_patterns = all_patterns
+
+        # Get all pattern node indices as a set
+        self.pattern_nodes_set = set()
+        for nodes in all_patterns.values():
+            self.pattern_nodes_set.update(nodes)
 
     def update_class_weights(self, class_weights: torch.Tensor):
         """Update class weights (e.g., when labels change at coarser levels)."""
         self.class_weights = class_weights
         self.class_loss = nn.CrossEntropyLoss(weight=class_weights)
 
+    def set_patterns(
+        self,
+        alert_patterns: Dict[str, List[int]] = None,
+        normal_patterns: Dict[str, List[int]] = None,
+    ):
+        """Update patterns (e.g., after coarsening remaps node indices)."""
+        self.alert_patterns = alert_patterns or {}
+        self.normal_patterns = normal_patterns or {}
+        self._precompute_pattern_info()
+
+    def _compute_pattern_contrastive_loss(
+        self, embeddings: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute contrastive loss to:
+        1. Pull embeddings of nodes within the same pattern closer together
+        2. Push embeddings of pattern nodes away from non-pattern nodes
+
+        Uses a triplet-style loss with:
+        - Anchor: centroid of each pattern
+        - Positive: nodes within the same pattern
+        - Negative: nodes outside the pattern
+        """
+        device = embeddings.device
+        N = embeddings.shape[0]
+
+        if len(self.all_patterns) == 0:
+            return torch.tensor(0.0, device=device)
+
+        # Normalize embeddings for cosine similarity
+        embeddings_norm = F.normalize(embeddings, p=2, dim=1)
+
+        intra_loss = torch.tensor(0.0, device=device)
+        inter_loss = torch.tensor(0.0, device=device)
+        n_patterns = 0
+
+        for pattern_id, node_indices in self.all_patterns.items():
+            if len(node_indices) < 2:
+                continue
+
+            # Filter valid indices (in case of coarsening reducing node count)
+            valid_indices = [idx for idx in node_indices if idx < N]
+            if len(valid_indices) < 2:
+                continue
+
+            pattern_indices = torch.tensor(
+                valid_indices, dtype=torch.long, device=device
+            )
+            pattern_embeddings = embeddings_norm[pattern_indices]
+
+            # 1. Intra-pattern loss: minimize distance within pattern
+            # Compute centroid of the pattern
+            centroid = pattern_embeddings.mean(dim=0, keepdim=True)
+
+            # Distance from each node to centroid (want to minimize)
+            intra_distances = 1 - torch.sum(pattern_embeddings * centroid, dim=1)
+            intra_loss += intra_distances.mean()
+
+            # 2. Inter-pattern loss: maximize distance from non-pattern nodes
+            # Sample negative nodes (nodes not in this pattern)
+            pattern_set = set(valid_indices)
+            non_pattern_indices = [i for i in range(N) if i not in pattern_set]
+
+            if len(non_pattern_indices) > 0:
+                # Sample a subset of negative nodes for efficiency
+                n_neg_samples = min(len(non_pattern_indices), len(valid_indices) * 2)
+                neg_sample_indices = torch.tensor(
+                    non_pattern_indices[:n_neg_samples], dtype=torch.long, device=device
+                )
+                neg_embeddings = embeddings_norm[neg_sample_indices]
+
+                # Distance from centroid to negative samples (want to maximize, so minimize negative)
+                neg_distances = torch.sum(centroid * neg_embeddings, dim=1)
+
+                # Hinge loss: push negatives beyond margin
+                inter_loss += F.relu(self.pattern_margin + neg_distances - 1).mean()
+
+            n_patterns += 1
+
+        if n_patterns > 0:
+            intra_loss = intra_loss / n_patterns
+            inter_loss = inter_loss / n_patterns
+
+        return self.intra_weight * intra_loss + self.inter_weight * inter_loss
+
     def forward(
         self,
         output: torch.Tensor,
         labels: torch.Tensor,
-        # coarsening_matrix: torch.Tensor,
         train_idx: torch.Tensor,
         embeddings: torch.Tensor = None,
-        coarse_loss: bool = True,
+        coarse_loss: bool = False,
     ):
         """
-        output: [N, C] log-probabilities (log_softmax).
+        output: [N, C] raw logits (CrossEntropyLoss expects raw logits, not softmax).
         embeddings: [N, D] raw features from model.get_embeddings().
         labels: [N] ground-truth class labels.
-        coarsening_matrix: [Nc, N] coarsening matrix.
-        train_idx: indices of coarsened nodes used for classification loss.
+        train_idx: indices of nodes used for classification loss.
+        coarse_loss: if True, compute pattern contrastive loss.
         """
 
         # 1. Classification loss
         loss_cls = self.class_loss(output[train_idx], labels[train_idx])
-        if not coarse_loss:
+
+        if not coarse_loss or embeddings is None:
             return loss_cls
 
-        # 2. Embedding normalization
-        # with torch.no_grad():
-        #     supernodes = torch.zeros(N, dtype=torch.long, device=device)
-        #     for i, j in zip(*coarsening_matrix.indices()):
-        #         supernodes[j] = i
+        # 2. Pattern contrastive loss
+        loss_pattern = self._compute_pattern_contrastive_loss(embeddings)
 
-        loss_coarse = -torch.mean(torch.sum(embeddings**2, dim=1))
-        N = embeddings.shape[0]
-
-        # Adaptive negative sampling (scales with graph size, capped for efficiency)
-        n_sample = min(max(int(N * 0.05), 100), 1000)
-
-        # Sample distinct pairs for better negative sampling
-        sampled_indices1 = torch.randint(0, N, (n_sample,), device=embeddings.device)
-        sampled_indices2 = torch.randint(0, N, (n_sample,), device=embeddings.device)
-
-        # Ensure we're sampling different nodes (avoid i==j)
-        mask = sampled_indices1 != sampled_indices2
-        if mask.sum() > 0:
-            embeddings1 = embeddings[sampled_indices1[mask]]
-            embeddings2 = embeddings[sampled_indices2[mask]]
-            loss_coarse += torch.mean(torch.sum(embeddings1 * embeddings2, dim=1))
-        # for _ in range(n_sample):
-        # i, j =
-        # emb_i = embeddings[i]
-        # emb_j = embeddings[j]
-        # sim = F.cosine_similarity(emb_i.unsqueeze(0), emb_j.unsqueeze(0)).squeeze()
-
-        # if supernodes[i] != supernodes[j]:
-        # loss_coarse += sim
-        # else:
-        #     loss_coarse += sim
-        # count += 1
-
-        # loss_coarse = (
-        #     loss_coarse / count if count > 0 else torch.tensor(0.0, device=device)
-        # )
-        return loss_cls + self.coarse_weight * loss_coarse
+        return loss_cls + self.coarse_weight * loss_pattern
 
 
 def apply_graph_coarsening(

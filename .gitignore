@@ -10,6 +10,7 @@ src/train/federated_learning/results
 old
 *results/
 *data/
+*experiments/
 
 
 

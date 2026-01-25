@@ -5,6 +5,7 @@ import sys
 import numpy as np
 from tqdm import tqdm
 
+from src.GangPrediction.experiment_utils import evaluate_at_level
 from src.ml.metrics.metrics import average_precision_score
 
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
@@ -12,7 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
 # torch
 import torch
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.utils import to_networkx
 import networkx as nx
 
@@ -27,45 +28,6 @@ from src.GangPrediction.GNN_model import GCN, train_gnn_1_epoch, evaluate_model
 from src.GangPrediction.coarsening_aware_loss import *
 
 
-def compute_class_weights(
-    labels: torch.Tensor, train_idx: torch.Tensor = None, device: str = "cpu"
-) -> torch.Tensor:
-    """
-    Compute class weights based on inverse frequency for handling class imbalance.
-
-    Args:
-        labels: Tensor of shape [N] with class labels
-        train_idx: Optional tensor of training indices. If provided, weights are computed
-                   only from training labels. Otherwise, uses all labels.
-        device: Device to place the weights tensor on
-
-    Returns:
-        Tensor of shape [num_classes] with class weights (higher weight for minority class)
-    """
-    if train_idx is not None:
-        train_labels = labels[train_idx]
-    else:
-        train_labels = labels
-
-    num_classes = len(torch.unique(labels))
-    class_counts = torch.zeros(num_classes, device=device)
-
-    for c in range(num_classes):
-        class_counts[c] = (train_labels == c).sum().float()
-
-    # Avoid division by zero
-    class_counts = torch.clamp(class_counts, min=1.0)
-
-    # Inverse frequency weighting
-    total = class_counts.sum()
-    class_weights = total / (num_classes * class_counts)
-
-    # Normalize so weights sum to num_classes (maintains loss scale)
-    class_weights = class_weights * num_classes / class_weights.sum()
-
-    return class_weights
-
-
 def train_GNN(
     data,
     epochs,
@@ -75,10 +37,12 @@ def train_GNN(
     dropout=0.1,
     device="cpu",
     use_class_weights=True,
+    **kwargs,
 ):
     """Train a vanilla GCN on the full-resolution graph."""
     # model
     nclass = len(np.unique(data.y.numpy()))  # 7
+    # Keep nclass as-is for CrossEntropyLoss compatibility (don't reduce to 1 for binary)
     model = GCN(nfeat=data.num_features, nhid=nhid, nclass=nclass, dropout=dropout).to(
         device
     )
@@ -116,47 +80,80 @@ def train_GNN(
 def train_GNN_coarsening_aware_loss(
     data: Data,
     levels: int,
-    epoch_per_level: int,
-    lr=0.01,  # Reduced from 0.01 for stability
+    lr=0.01,
     wd=5e-4,
     method="variation_neighborhoods",
     algorithm: str = "greedy",
-    similarity_threshold=0.65,
+    similarity_threshold=0.0,
+    max_epsilon=float("inf"),
     K=50,
     nhid=128,
     dropout=0.1,
     device="cpu",
-    # save_path="results",
-    create_gif=True,
     use_class_weights=True,
-    grad_clip=1.0,  # Gradient clipping for stability
-    warmup_epochs=3,  # Extra epochs at start of each level
+    B=None,
+    alert_patterns=None,
+    normal_patterns=None,
+    alert_thresholds=0.5,
+    normal_thresholds=0.5,
+    prob_threshold=0.3,
+    # Train patterns for contrastive loss (separate from eval patterns)
+    alert_train_patterns=None,
+    normal_train_patterns=None,
+    # Dynamic epoch scheduling parameters
+    initial_epochs=5,
+    min_epochs=1,
+    max_epoch_interval=3,
+    loss_window=5,
+    loss_threshold=0.01,
+    train=False,
+    model=None,
+    # Pattern type dictionaries for per-type detection tracking
+    alert_types=None,
+    normal_types=None,
+    **kwargs,
 ):
-    """Train a GCN across coarsening levels while applying a coarsening-aware loss."""
-    # model
-    N = data.num_nodes  # 2708
-    nclass = len(np.unique(data.y.numpy()))  # 7
-    model = GCN(nfeat=data.num_features, nhid=nhid, nclass=nclass, dropout=dropout).to(
-        device
-    )
+    """
+    Train a GCN across coarsening levels while applying a coarsening-aware loss.
+
+    Simple epoch schedule:
+    - Start with initial_epochs (default 5) epochs per coarsening level
+    - Gradually reduce to 1 epoch per 3 coarsening levels at the end
+    """
+    N = data.num_nodes
+    nclass = len(np.unique(data.y.numpy()))
+
+    if model is None:
+        model = GCN(
+            nfeat=data.num_features, nhid=nhid, nclass=nclass, dropout=dropout
+        ).to(device=device)
 
     # Compute class weights for imbalanced data
     class_weights = None
     if use_class_weights:
         train_idx = data.train_idx if hasattr(data, "train_idx") else None
         class_weights = compute_class_weights(data.y, train_idx, device=device)
+        # class_weights = torch.tensor([0.1, 0.9])
         print(f"Using class weights: {class_weights}")
 
-    # criterion
-    criterion = CoarseningAwareLoss(class_weights=class_weights)
+    if train:
+        # criterion - use train patterns for contrastive loss
+        criterion = CoarseningAwareLoss(
+            class_weights=class_weights,
+            alert_patterns=alert_train_patterns,
+            normal_patterns=normal_train_patterns,
+        )
 
-    # train data
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
-
-    # Learning rate scheduler - reduce LR when loss plateaus
-    scheduler = ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-5
-    )
+        # train data
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+        # Learning rate scheduler - reduce LR when loss plateaus
+        scheduler = ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-5
+        )
+        # Track epochs for logging
+        train_loss = 0.0  # Initialize for cases when epochs=0
+    else:
+        model.eval()
 
     original_data = data
     Gc = data
@@ -189,37 +186,64 @@ def train_GNN_coarsening_aware_loss(
         [],
         [],
     )
+    alert_rates = []
+    alert_rates_gt = []
+    normal_rates_gt = []
+    # Rate1 and Rate2 for detailed tracking
+    alert_rates_rate1 = []
+    alert_rates_rate2 = []
+    alert_gt_type_rates = []
+    normal_gt_type_rates = []
+    alert_rates_gt_rate1 = []
+    alert_rates_gt_rate2 = []
+    normal_rates_gt_rate1 = []
+    normal_rates_gt_rate2 = []
+    # Per-type detection rates
+    alert_model_type_rates = []
 
     # Initialize coarsening matrices and a layout for visualization/debugging.
     C = sparse_eye(N)
     C_plus = sparse_eye(N)
-    GG = to_networkx(Gc, to_undirected=True)
-    pos = nx.spring_layout(GG)
-    pos = [vals for vals in pos.values()]
-    Gc.pos = torch.tensor(pos, dtype=torch.float32, device=device)
 
-    if method == "variation_embedding":
-        B = calc_B_embedding(Gc, K)
-    else:
-        B = calc_B(Gc, K)
-    iC = None
+    if B is None:
+        if method == "variation_embedding":
+            print("Calculating B with embedding variation...")
+            B = calc_B_embedding(Gc, K)
+        else:
+            print("Calculating B with embedding variation...")
+            B = calc_B(Gc, K)
 
-    Call, Gall, iCs = [], [], []
-    Gall.append(Gc)
-    # Call.append(C)
+    Call, Gall = [np.eye(N)], [Gc]
 
     bar = tqdm(total=levels)
-    prev_accuracy_fine = 0.0
+    epsilon_l, epsilons = 0, []
+
+    # Dynamic epoch scheduling state
+    current_epochs = initial_epochs  # Start with initial_epochs per level
+    epoch_interval = 1  # Train every level initially (increases to max_epoch_interval)
+    loss_history = []  # Track training losses for convergence detection
+    epochs_per_level_history = []  # Track for saving
 
     for level in range(1, levels + 1):
-        ratio = np.log(level ** (4 / 3)) / 100 + 0.01
+        # Simple ratio schedule (original formula)
+        ratio = np.log(level) / 2000 + 0.0001
+        if ratio > 0.0025:
+            ratio = 0.0025
         # ratio = 1
-        # get embeddings from the GNN
-        S_mp = Gc.S_mp if hasattr(Gc, "S_mp") else Gc.W
-        embeddings = model.get_embeddings(Gc.x, S_mp)
-        Gc.embeddings = F.normalize(embeddings, p=2, dim=1)
 
-        Gc, B = coarse_one_level(
+        # Get embeddings from the GNN in eval mode with no_grad
+        # This avoids injecting dropout randomness and prevents backprop through stale representations
+        # model.eval()
+        # with torch.no_grad():
+        if train:
+            model.train()  # Switch back to train mode for the training step
+        embeddings = model.get_embeddings(Gc.x, Gc.edge_index, Gc.edge_weight)
+        Gc.embeddings = F.normalize(embeddings, p=2, dim=1).detach()
+
+        # max_eps_in_level += max_epsilon / levels
+        max_sigma = (max_epsilon + 1) / (epsilon_l + 1) - 1
+
+        Gc, B, sigma_l, done_flag = coarse_one_level(
             Gc,
             B,
             K=K,
@@ -228,84 +252,150 @@ def train_GNN_coarsening_aware_loss(
             similarity_threshold=similarity_threshold,
             level=level,
             r_cur=ratio,
+            max_sigma=max_sigma,
         )
         C = torch.sparse.mm(Gc.C, C)
         C_plus = torch.sparse.mm(C_plus, Gc.C_plus)
 
         Gall.append(Gc)
         Call.append(C)
-        iCs.append(iC)
 
-        # Add warmup epochs at level transitions for stability
-        total_epochs = epoch_per_level + (warmup_epochs if level <= 5 else 1)
-
-        for epoch in range(total_epochs):
-            # train the GNN on the coarsened graph
-            train_loss, train_acc = train_gnn_1_epoch(
-                model,
-                optimizer,
-                criterion,
-                Gc,
-                C_plus,
-                original_data.y,
-                original_data.train_idx,
-                coarse_loss=epoch == 0,
+        epsilon_l = (sigma_l + 1) * (epsilon_l + 1) - 1
+        if done_flag or epsilon_l >= max_epsilon:
+            print(
+                f"Reached max epsilon {max_epsilon} at level {level} with epsilon_l {epsilon_l:.3f}."
             )
+            break
+        epsilons.append(epsilon_l)
 
-            # Gradient clipping for stability
-            if grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        if train:
+            # Dynamic epoch scheduling: only train if at the right interval
+            if level % epoch_interval == 0:
+                for epoch in range(current_epochs):
+                    # train the GNN on the coarsened graph
+                    train_loss, train_acc = train_gnn_1_epoch(
+                        model,
+                        optimizer,
+                        criterion,
+                        Gc,
+                        C_plus,
+                        original_data.y,
+                        original_data.train_idx,
+                        coarse_loss=epoch == 0,
+                        class_weights=class_weights,
+                    )
 
-        # Update learning rate based on training loss
-        scheduler.step(train_loss)
+                # Track loss for convergence detection
+                loss_history.append(train_loss)
+                epochs_per_level_history.append(current_epochs)
 
-        # evaluate the model on the coarsened graph
+                # Adapt epochs based on loss convergence rate
+                if len(loss_history) >= loss_window:
+                    recent_losses = loss_history[-loss_window:]
+                    # Calculate average loss change rate over the window
+                    loss_change_rate = (
+                        abs(recent_losses[0] - recent_losses[-1]) / loss_window
+                    )
+
+                    # If loss is stabilizing (small changes), reduce training intensity
+                    if loss_change_rate < loss_threshold:
+                        if current_epochs > min_epochs:
+                            # First reduce epochs per level
+                            current_epochs = max(min_epochs, current_epochs - 1)
+                        elif epoch_interval < max_epoch_interval:
+                            # Then increase interval between training (train less frequently)
+                            epoch_interval = min(max_epoch_interval, epoch_interval + 1)
+                    elif loss_change_rate > loss_threshold * 3:
+                        # If loss is changing a lot, we may need more training
+                        if epoch_interval > 1:
+                            epoch_interval = max(1, epoch_interval - 1)
+                        elif current_epochs < initial_epochs:
+                            current_epochs = min(initial_epochs, current_epochs + 1)
+            else:
+                # Skip training at this level, use last known values
+                train_loss = loss_history[-1] if loss_history else 0.0
+                epochs_per_level_history.append(0)
+                scheduler.step(train_loss)
+
+        else:
+            train_loss = 0.0  # No training, so loss is 0
+
+        # Evaluate the model on the coarsened graph
         acc_test_c, precission_c, pred_test_c, logits = evaluate_model(
             model, Gc, log_info=False
         )
-        acc_test, precission, pred_test, _ = evaluate_model(
-            model, original_data, log_info=False
-        )
 
-        pred_fine = torch.argmax(F.softmax(C_plus @ logits, dim=1), dim=1)
-        # pred_fine = torch.argmax(F.log_softmax(C_plus @ logits, dim=1), dim=1)
+        # Project logits back to original graph size using C_plus
+        logits_fine = C_plus @ logits
+        pred_fine = torch.argmax(F.softmax(logits_fine, dim=1), dim=1)
 
         accuracy_fine = torch.sum(
             pred_fine[original_data.test_idx] == original_data.y[original_data.test_idx]
         ).item() / len(original_data.test_idx)
+
+        # Use positive class PROBABILITIES (not logits) for precision calculation
+        # AP requires scores in [0,1] range for proper thresholding
+        probs_fine = F.softmax(logits_fine, dim=1)
+        prob_fine_scores = (
+            probs_fine[:, 1].cpu().numpy()
+            if probs_fine.dim() > 1 and probs_fine.shape[1] == 2
+            else probs_fine.cpu().numpy()
+        )
+        # Correct argument order: y_true first, y_scores second
         precission_fine = average_precision_score(
-            pred_fine[original_data.test_idx].cpu().numpy(),
             original_data.y[original_data.test_idx].cpu().numpy(),
+            prob_fine_scores[original_data.test_idx.cpu().numpy()],
             recall_span=(0.6, 1.0),
         )
 
-        # Adaptive coarsening: slow down if accuracy drops significantly
-        if level > 1 and (accuracy_fine < prev_accuracy_fine - 0.02):
-            ratio *= 0.7  # Reduce coarsening rate
-        elif level > 1 and accuracy_fine >= prev_accuracy_fine:
-            ratio = min(ratio * 1.1, 0.99)  # Can be more aggressive
-
-        prev_accuracy_fine = accuracy_fine
+        results = evaluate_at_level(
+            model,
+            Gc,
+            C,
+            data.y,
+            alert_patterns,
+            normal_patterns,
+            alert_types=alert_types,
+            normal_types=normal_types,
+            alert_thresholds=alert_thresholds,
+            normal_thresholds=normal_thresholds,
+            prob_threshold=prob_threshold,
+        )
 
         bar.set_postfix_str(
-            f"{epoch_per_level}/{similarity_threshold:0.2f}, r: {ratio:.2f}, nodes: {Gc.num_nodes} "
-            # + f"Train Loss: {train_loss:.4f}, Train Accuracy: {train_acc:.4f}, "
-            + f"coarse: {acc_test_c:.4f}, orig: {acc_test:.4f} fine: {accuracy_fine:.4f}"
+            f"ep={current_epochs}, {epsilon_l:.6f}/{max_epsilon:0.3f}, ratio={ratio:.6f}, nodes: {Gc.num_nodes} | "
+            f"alert_rate: {results.get('alert_model_rate', 0):.4f}, normal_rate: {results.get('normal_gt_rate', 0):.4f} | "
+            f"prec: {precission_fine:.4f}, coarse: {acc_test_c:.4f}, fine: {accuracy_fine:.4f} | "
         )
         bar.update(1)
 
-        # ploting data
-        x.append(epoch + 1)
+        # Store data for plotting
+        x.append(level)
         ycrs.append(acc_test_c)
         yfine.append(accuracy_fine)
-        ylosst.append(train_loss)
-        # ylossv.append(validation_loss)
-        # valacc.append(validation_accuracy)
+        ylosst.append(train_loss if current_epochs > 0 else ylosst[-1] if ylosst else 0)
         num_nodes_coarse.append(Gc.num_nodes)
         prec_l.append(precission_c)
         prec_fine.append(precission_fine)
+        alert_rates.append(results.get("alert_model_rate", 0))
+        alert_rates_gt.append(results.get("alert_gt_rate", 0))
+        normal_rates_gt.append(results.get("normal_gt_rate", 0))
+        # Store rate1 and rate2 for detailed analysis
+        alert_rates_rate1.append(results.get("alert_model_rate1", 0))
+        alert_rates_rate2.append(results.get("alert_model_rate2", 0))
+        alert_rates_gt_rate1.append(results.get("alert_gt_rate1", 0))
+        alert_rates_gt_rate2.append(results.get("alert_gt_rate2", 0))
+        normal_rates_gt_rate1.append(results.get("normal_gt_rate1", 0))
+        normal_rates_gt_rate2.append(results.get("normal_gt_rate2", 0))
+        # Store per-type detection rates
+        alert_gt_type_rates.append(results.get("alert_gt_type_rates", {}))
+        alert_model_type_rates.append(results.get("alert_model_type_rates", {}))
+        normal_gt_type_rates.append(results.get("normal_gt_type_rates", {}))
 
-    name = f"data_gnn_CoarseningAwareLoss_V2_th_{similarity_threshold*100:.0f}_epochs_{epoch_per_level}.npy"
+    if train:
+        name = f"data_gnn_CoarseningAwareLoss_V2_th_{similarity_threshold*100:.0f}_ep_{max_epsilon}_dynamic_train.npy"
+    else:
+        name = f"data_gnn_CoarseningAwareLoss_V2_th_{similarity_threshold*100:.0f}_ep_{max_epsilon}_dynamic_inference.npy"
     np.save(
         f"{save_path}{name}",
         {
@@ -315,15 +405,23 @@ def train_GNN_coarsening_aware_loss(
             "ylosst": ylosst,
             "prec_l": prec_l,
             "prec_fine": prec_fine,
-            # "Gall": Gall,
-            # "Call": Call,
-            # "ylossv": ylossv,
-            # "valacc": valacc,
+            "epsilons": epsilons,
             "num_nodes_coarse": num_nodes_coarse,
-            "description": f"Data obtained using: {method=}, {similarity_threshold=}, CoarseningAwareLoss() levels approach",
+            "epochs_per_level": epochs_per_level_history,
+            "alert_rates": alert_rates,
+            "alert_rates_gt": alert_rates_gt,
+            "normal_rates_gt": normal_rates_gt,
+            "alert_rates_rate1": alert_rates_rate1,
+            "alert_rates_rate2": alert_rates_rate2,
+            "alert_rates_gt_rate1": alert_rates_gt_rate1,
+            "alert_rates_gt_rate2": alert_rates_gt_rate2,
+            "normal_rates_gt_rate1": normal_rates_gt_rate1,
+            "normal_rates_gt_rate2": normal_rates_gt_rate2,
+            # Per-type detection rates
+            "alert_gt_type_rates": alert_gt_type_rates,
+            "alert_model_type_rates": alert_model_type_rates,
+            "normal_gt_type_rates": normal_gt_type_rates,
         },
     )
 
     return Gall, Call, model, C_plus
-
-    # plt.show()

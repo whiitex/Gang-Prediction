@@ -17,24 +17,31 @@ from src.ml.metrics.metrics import average_precision_score
 class GCN(nn.Module):
     def __init__(self, nfeat, nhid, nclass, dropout=0.5):
         super(GCN, self).__init__()
-        self.conv1 = SAGEConv(nfeat, nhid)
-        self.conv2 = SAGEConv(nhid, nclass)
+        self.conv1 = GCNConv(nfeat, nhid)
+        self.conv2 = GCNConv(nhid, nhid)
+        self.conv3 = GCNConv(nhid, nhid)
+        self.conv4 = GCNConv(nhid, nclass)
         self.dropout = dropout
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_weight=None):
         """Compute logits for each node."""
-        x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv1(x, edge_index, edge_weight))
         x = F.dropout(x, self.dropout, training=self.training)
-        x = self.conv2(x, edge_index)
+        x = F.relu(self.conv2(x, edge_index, edge_weight))
+        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.relu(self.conv3(x, edge_index, edge_weight))
+        x = self.conv4(x, edge_index, edge_weight)
         return x
         # return F.log_softmax(x, dim=1)
 
-    def get_embeddings(self, x, edge_index):
+    def get_embeddings(self, x, edge_index, edge_weight=None):
         """Return intermediate node embeddings (pre-classifier)."""
         # x = x.to(next(self.parameters()).device)  # send x to the model's device
         # edge_index = edge_index.to(x.device)
-        x = F.relu(self.conv1(x, edge_index))
-        # x = F.relu(self.conv1(x, edge_index))
+        # x = F.relu(self.conv1(x, edge_index, edge_weight))
+        x = F.relu(self.conv1(x, edge_index, edge_weight))
+        x = F.relu(self.conv2(x, edge_index, edge_weight))
+        x = F.relu(self.conv3(x, edge_index, edge_weight))
         return x
 
     def reset_parameters(self):
@@ -51,6 +58,7 @@ def train_gnn_1_epoch(
     y=None,
     train_idx: list = None,
     coarse_loss: bool = False,
+    class_weights: torch.Tensor = None,
 ):
     """
     Output:
@@ -65,22 +73,35 @@ def train_gnn_1_epoch(
     model.train()
     optimizer.zero_grad()
 
-    S_mp = data.S_mp if hasattr(data, "S_mp") else data.W
+    # S_mp = data.S_mp if hasattr(data, "S_mp") else data.W
     y = y if y is not None else data.y
     train_idx = train_idx if train_idx is not None else data.train_idx
 
-    logits = model(data.x, S_mp)
+    logits = model(
+        data.x,
+        data.edge_index,
+        data.edge_weight if hasattr(data, "edge_weight") else None,
+    )
+    if class_weights is not None:
+        class_weights = class_weights.to(logits.device)
+        logits = logits * class_weights.unsqueeze(0)
     if C_plus is not None:
-        pred_fine = F.softmax(C_plus @ logits, dim=1)
+        logits = C_plus @ logits
         # pred_fine = F.log_softmax(C_plus @ logits, dim=1)
-    else:
-        pred_fine = F.softmax(logits, dim=1)
-        # pred_fine = F.log_softmax(logits, dim=1)
-    # embeddings = model.get_embeddings(data.x, data.edge_index)
+    # else:
+    # pred_fine = F.log_softmax(logits, dim=1)
+    pred_fine = F.softmax(logits, dim=1)
+    # embeddings = model.get_embeddings(data.x, data.edge_index, data.edge_weight if hasattr(data, "edge_weight") else None)
 
     # train
     embeddings = data.embeddings if hasattr(data, "embeddings") else None
-    loss = criterion(pred_fine, y, train_idx, embeddings, coarse_loss=coarse_loss)
+    # embeddings = model.get_embeddings(
+    #     data.x,
+    #     data.edge_index,
+    #     data.edge_weight if hasattr(data, "edge_weight") else None,
+    # )
+    # embeddings = F.normalize(embeddings, p=2, dim=1)
+    loss = criterion(logits, y, train_idx, embeddings, coarse_loss=coarse_loss)
     loss.backward()
     optimizer.step()
     train_acc = accuracy_score(
@@ -108,21 +129,33 @@ def evaluate_model(model: nn.Module, data: Data, log_info=True):
     S_mp = data.S_mp if hasattr(data, "S_mp") else data.W
 
     with torch.no_grad():
-        logits = model(data.x, S_mp)
+        logits = model(
+            data.x,
+            data.edge_index,
+            data.edge_weight if hasattr(data, "edge_weight") else None,
+        )
+        #
         output = F.softmax(logits, dim=1)
         # output = F.log_softmax(logits, dim=1)
         # if C_plus is not None:
         #     pred_test = C_plus @ output
         # else:
         #     pred_test = output
+        logit_test = logits[data.test_idx]
         pred_test = output[data.test_idx].max(1)[1]
         acc_test = accuracy_score(
             data.y[data.test_idx].cpu().numpy(), pred_test.cpu().numpy()
         )
 
+        # For binary classification with 2-class output, use positive class scores
+        logit_test_scores = (
+            logit_test[:, 1].cpu().numpy()
+            if logit_test.dim() > 1 and logit_test.shape[1] == 2
+            else logit_test.cpu().numpy()
+        )
         precission = average_precision_score(
             data.y[data.test_idx].cpu().numpy(),
-            pred_test.cpu().numpy(),
+            logit_test_scores,
             recall_span=(0.6, 1.0),
         )
 

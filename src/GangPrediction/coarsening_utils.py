@@ -1,5 +1,6 @@
 """Graph coarsening utilities based on variation-aware contractions."""
 
+from copy import deepcopy
 import scipy
 import torch
 import numpy as np
@@ -8,6 +9,7 @@ from torch_geometric.data import Data
 from torch_geometric.utils import k_hop_subgraph
 from torch_sparse import SparseTensor
 from sortedcontainers import SortedList
+from tqdm import tqdm
 
 from src.GangPrediction.utils.utils import degree, graph_params, sparse_eye
 from src.GangPrediction.maxWeightMatching import maxWeightMatching
@@ -26,7 +28,8 @@ def coarsen(
     Uk=None,
     lk=None,
     max_level_r=0.99,
-    similarity_threshold=0.5,
+    similarity_threshold=0.0,
+    max_epsilon=float("inf"),
 ):
     """
     This function provides a common interface for coarsening algorithms that contract subgraphs
@@ -40,6 +43,8 @@ def coarsen(
         The desired reduction defined as 1 - n/N.
     method : String
         ['variation_neighborhoods', 'variation_edges', 'variation_cliques', 'heavy_edge', 'algebraic_JC', 'affinity_GS', 'kron']
+    max_epsilon : float
+        The maximum cumulative epsilon allowed.
 
     Returns
     -------
@@ -66,10 +71,13 @@ def coarsen(
     iC = None
 
     Call, Gall = [], []
+    epsilon_l, max_eps_in_level, epsilons = 0, 0, [0]
     Gall.append(Gc)
 
     for level in range(1, max_levels + 1):
-        Gc, B = coarse_one_level(
+        # max_eps_in_level += max_epsilon / max_levels
+        max_sigma = (max_epsilon + 1) / (epsilon_l + 1) - 1
+        Gc, B, sigma_l = coarse_one_level(
             Gc,
             B,
             K=K,
@@ -78,11 +86,15 @@ def coarsen(
             similarity_threshold=similarity_threshold,
             level=level,
             r_cur=r,
+            max_sigma=max_sigma,
         )
 
         C = torch.sparse.mm(iC, C)
         Call.append(iC)
         Gall.append(Gc)
+
+        epsilon_l = (sigma_l + 1) * (epsilon_l + 1) - 1
+        epsilons.append(epsilon_l)
 
         if iC.shape[1] - iC.shape[0] <= 2:
             break  # avoid too many levels for so few nodes
@@ -98,48 +110,65 @@ def coarse_one_level(
     K=10,
     method="variation_neighborhoods",
     algorithm="greedy",
-    similarity_threshold=0.5,
     level=1,
     r_cur=None,
+    similarity_threshold=0.0,
+    max_sigma=float("inf"),
 ):
     """Coarsen a single level using a variation-based or matching-based policy."""
+
+    done_flag = False
 
     if "variation" in method:
         if level == 1:
             A = B
         else:
             B = torch.sparse.mm(G.C, B)
-            d, V = torch.linalg.eigh(B.T @ G.L @ B)
+            # d, V = torch.linalg.eigh(B.T @ G.L @ B)
+            X_init = torch.randn(B.shape[1], K, device=G.L.device)
+            d, V = torch.lobpcg(
+                B.T @ G.L @ B, k=K, X=X_init, largest=False, niter=50, tol=1e-4
+            )
+            # d = torch.ones(K, device=G.L.device)
+            # V = torch.eye(K, device=G.L.device)
             mask = d < 1e-10
             d[mask] = 1
-            dinvsqrt = d ** (-0.5)
+            # dinvsqrt = d ** (0)
+            if method in ["variation_edges", "variation_embedding"]:
+                dinvsqrt = d ** (-0.5)
+            elif method == "gang_edges":
+                dinvsqrt = d ** (+0.5)
+            # dinvsqrt = d ** (-0.5)
             dinvsqrt[mask] = 0
             A = B @ V @ torch.diag(dinvsqrt) @ V.T
 
-        if method == "variation_edges":
-            coarsening_list = contract_variation_edges(
+        if method in ["variation_edges", "gang_edges", "variation_embedding"]:
+            coarsening_list, sigma_l, done_flag = contract_variation_edges(
                 G,
                 A=A,
                 r=r_cur,
                 algorithm=algorithm,
                 similarity_threshold=similarity_threshold,
+                max_sigma=max_sigma,
             )
-        elif method == "variation_embedding":
-            coarsening_list = contract_variation_edges(
-                G,
-                A=A,
-                # A=G.embeddings,
-                r=r_cur,
-                algorithm=algorithm,
-                similarity_threshold=similarity_threshold,
-            )
+        # elif method == "variation_embedding":
+        #     coarsening_list, sigma_l, done_flag = contract_variation_edges(
+        #         G,
+        #         A=A,
+        #         # A=G.embeddings,
+        #         r=r_cur,
+        #         algorithm=algorithm,
+        #         similarity_threshold=similarity_threshold,
+        #         max_sigma=max_sigma,
+        #     )
         else:
-            coarsening_list = contract_variation_linear(
+            coarsening_list, sigma_l, done_flag = contract_variation_linear(
                 G,
                 A=A,
                 r=r_cur,
                 mode=method,
                 similarity_threshold=similarity_threshold,
+                max_sigma=max_sigma,
             )
 
     else:
@@ -153,46 +182,75 @@ def coarse_one_level(
             coarsening_list = matching_optimal(G, weights=weights, r=r_cur)
 
         elif algorithm == "greedy":
-            coarsening_list = matching_greedy(G, weights=weights, r=r_cur)
+            coarsening_list, sigma_l, done_flag = matching_greedy(
+                G,
+                weights=weights,
+                r=r_cur,
+                similarity_threshold=similarity_threshold,
+                max_sigma=max_sigma,
+            )
 
     iC = get_coarsening_matrix(coarsening_list, G.num_nodes)
 
     Gc = construct_G(G, iC)
 
-    return Gc, B
+    return Gc, B, sigma_l, done_flag
 
 
-def calc_B(Gc, K, Uk=None, lk=None):
+def calc_B(Gc, K, U=None):
     """Compute the spectral basis used by variation-based coarsening."""
-    if (Uk is not None) and (lk is not None) and (len(lk) >= K):
-        mask = lk < 1e-10
-        lk[mask] = 1
-        lsinv = lk ** (0.5)
-        lsinv[mask] = 0
-        B = Uk[:, :K] @ torch.diag(lsinv[:K])
-    else:
-        # Use sparse eigendecomposition for efficiency (10-100x faster than dense)
-        try:
-            # Initialize with random vectors for lobpcg
-            X_init = torch.randn(Gc.num_nodes, K, device=Gc.L.device)
-            lk, Uk = torch.lobpcg(
-                Gc.L, k=K, X=X_init, largest=False, niter=200, tol=1e-4
-            )
-        except Exception as e:
-            # Fallback to dense if lobpcg fails (e.g., very small graphs)
-            print(
-                f"Warning: lobpcg failed ({e}), falling back to dense eigendecomposition"
-            )
-            d, V = torch.linalg.eigh(Gc.L.to_dense())
-            lk = d[:K]
-            Uk = V[:, :K]
+    if (U is not None) and (U.shape[1] >= K):
+        d, V = torch.linalg.eigh(Gc.L.to_dense())
+        # X_init = torch.randn(Gc.num_nodes, K, device=Gc.L.device)
+        # d, V = torch.lobpcg(Gc.L, k=K, X=X_init, largest=False, niter=200, tol=1e-4)
+        # lk = d[:K]
+        # Vk = V[:, :K]
+        lk = d
+        Vk = V
 
         mask = lk < 0
+        lk[mask] = 1
+        lsinv = lk ** (+0.5)
+        lsinv[mask] = 0
+
+        Uk = U[:, :K]
+        B = Uk @ (Uk.T @ Vk @ torch.diag(lsinv)) @ Vk.T
+    else:
+        # Use sparse eigendecomposition for efficiency (10-100x faster than dense)
+        # try:
+        #     # Initialize with random vectors for lobpcg
+        #     X_init = torch.randn(Gc.num_nodes, K, device=Gc.L.device)
+        #     lk, Uk = torch.lobpcg(
+        #         Gc.L, k=K, X=X_init, largest=False, niter=200, tol=1e-4
+        #     )
+        # except Exception as e:
+        #     # Fallback to dense if lobpcg fails (e.g., very small graphs)
+        #     print(
+        #         f"Warning: lobpcg failed ({e}), falling back to dense eigendecomposition"
+        #     )
+        # d, V = torch.linalg.eigh(Gc.L.to_dense())
+        # # d = torch.flip(d, dims=[0])
+        # # V = torch.flip(V, dims=[1])
+        # lk = d[:K]
+        # Uk = V[:, :K]
+
+        # mask = lk < 0
+        # lk[mask] = 1
+        # lsinv = lk ** (-0.5)
+        # lsinv[mask] = 0
+        # B = Uk @ torch.diag(lsinv)
+
+        offset = 2 * max(Gc.dw)
+        T = offset * sparse_eye(Gc.num_nodes) - Gc.L
+        # lk, Uk = torch.linalg.eigh(T, k=K, which="LM", tol=1e-5)
+        lk, Uk = torch.lobpcg(T, k=K, largest=True, tol=1e-5)
+        lk = torch.flip(offset - lk, [0])
+        Uk = torch.flip(Uk, [1])
+        mask = lk < 1e-10
         lk[mask] = 1
         lsinv = lk ** (-0.5)
         lsinv[mask] = 0
         B = Uk @ torch.diag(lsinv)
-
     return B
 
 
@@ -203,41 +261,83 @@ def calc_B_embedding(Gc, K):
     # # L-orthonormal basis of span(Y)
     # B0 = l_orthonormalize(Y, Gc.L, ridge=1e-6)  # [N, k], k = rank(Y) (<= d)
     # Given: sparse L, A, dense X (n x d), target k
-    Y = Gc.W @ Gc.x
-    YtY = Y.T @ Y
-    YtLY = Y.T @ (Gc.L @ Y)
-    Y = Y.cpu().detach().numpy()
-    YtLY = YtLY.cpu().detach().numpy()
-    YtY = YtY.cpu().detach().numpy()
+    # Y = Gc.W @ Gc.x
+    # YtY = Y.T @ Y
+    # YtLY = Y.T @ (Gc.L @ Y)
+    # Y = Y.cpu().detach().numpy()
+    # YtLY = YtLY.cpu().detach().numpy()
+    # YtY = YtY.cpu().detach().numpy()
 
-    # Use adaptive regularization based on matrix scale
-    # to ensure numerical stability
-    max_diag = np.abs(np.diag(YtY)).max()
-    if max_diag == 0 or np.isnan(max_diag):
-        max_diag = 1.0
-    eps = max(1e-4, 1e-2 * max_diag)  # Stronger regularization
+    # eps = 1e-3
+    # # Solve (Y^T L Y) v = lambda (Y^T Y + eps I) v
+    # w, V = scipy.linalg.eigh(YtLY, YtY + eps * np.eye(YtY.shape[0]))
+    # idx = np.argsort(w)[:K]  # k smallest lambdas (smoothest)
+    # Vk = V[:, idx]
+    # Z = Y @ Vk  # n x k
+    # lam = w[idx]
+    # B0 = Z @ np.diag(lam**+0.5)  # L-orthonormal basis in span(Y)
+    # # -> use B0 in the p.16-style k×k updates at each coarsening level
+    # return torch.tensor(B0, dtype=torch.float32, device=Gc.x.device)
+    # A = torch.diag(Gc.dw) - Gc.L
+    Q = arnoldi_iteration(Gc.L, K)[1]
+    return Q.float()
+    # return F.normalize(Q, p=2, dim=1)
 
-    # Solve (Y^T L Y) v = lambda (Y^T Y + eps I) v
-    try:
-        w, V = scipy.linalg.eigh(YtLY, YtY + eps * np.eye(YtY.shape[0]))
-    except np.linalg.LinAlgError:
-        # If still fails, use even stronger regularization
-        eps = 0.1 * max_diag
-        try:
-            w, V = scipy.linalg.eigh(YtLY, YtY + eps * np.eye(YtY.shape[0]))
-        except np.linalg.LinAlgError:
-            # Last resort: use standard eigendecomposition on YtLY alone
-            w, V = np.linalg.eigh(YtLY)
 
-    idx = np.argsort(w)[:K]  # k smallest lambdas (smoothest)
-    Vk = V[:, idx]
-    Z = Y @ Vk  # n x k
-    lam = w[idx]
-    # Protect against division by very small or negative eigenvalues
-    lam = np.maximum(np.abs(lam), 1e-8)
-    B0 = Z @ np.diag(lam**-0.5)  # L-orthonormal basis in span(Y)
-    # -> use B0 in the p.16-style k×k updates at each coarsening level
-    return torch.tensor(B0, dtype=torch.float32, device=Gc.x.device)
+def arnoldi_iteration(A, m: int, b=None, log=True):
+    local_dev = "cpu"
+    # local_dev = dev
+    """Compute a basis of the (n + 1)-Krylov subspace of the matrix A.
+
+    This is the space spanned by the vectors {b, Ab, ..., A^n b}.
+
+    Parameters
+    ----------
+    A : array_like
+        An m × m array.
+    b : array_like
+        Initial vector (length m).
+    n : int
+        One less than the dimension of the Krylov subspace, or equivalently the *degree* of the Krylov space. Must be >= 1.
+
+    Returns
+    -------
+    Q : numpy.array
+        An m x (n + 1) array, where the columns are an orthonormal basis of the Krylov subspace.
+    h : numpy.array
+        An (n + 1) x n array. A on basis Q. It is upper Hessenberg.
+    """
+    A = deepcopy(A).double()
+    A = A.to_sparse().to(local_dev)
+    if b is None:
+        # b = torch.ones(A.shape[0], dtype=torch.double, device=dev)
+        b = torch.randn(A.shape[0], dtype=torch.double, device=local_dev)
+        if torch.sum(b) < 0:
+            b = -b
+    eps = 1e-12
+    h = torch.zeros((m, m), dtype=torch.double, device=local_dev)
+    Q = torch.zeros((A.shape[0], m), dtype=torch.double, device=local_dev)
+    # Normalize the input vector
+    Q[:, 0] = b / torch.norm(b, 2)  # Use it as the first Krylov vector
+    if log:
+        bar = tqdm(total=m - 1)
+    for k in range(1, m):
+        v = A @ Q[:, k - 1]  # Generate a new candidate vector
+        for j in range(k):  # Subtract the projections on previous vectors
+            h[j, k - 1] = Q[:, j].conj() @ v
+            v = v - h[j, k - 1] * Q[:, j]
+
+        h[k, k - 1] = torch.norm(v, 2)
+        if h[k, k - 1] > eps:  # Add the produced vector to the list, unless
+            Q[:, k] = v / h[k, k - 1]
+        else:  # If that happens, stop iterating.
+            return h, Q
+        if log:
+            bar.update()
+
+    # h = h.to(dev)
+    # Q = Q.to(dev)
+    return h, Q
 
 
 ################################################################################
@@ -263,12 +363,17 @@ def construct_G(G: Data, iC: SparseTensor):
     Gc.dw = dw
     Gc.W = W
     # Gc.soft_y = torch.sparse.mm(iC, G.soft_y) if G.soft_y is not None else None
-    Gc.soft_y = coarsen_vector(G.soft_y, iC) if G.soft_y is not None else None
-    Gc.y = torch.argmax(Gc.soft_y, dim=1) if Gc.soft_y is not None else Gc.y
-    Gc.y_train = coarsen_vector(G.y_train, iC) if G.y_train is not None else None
-    s = Gc.y_train.sum(1)
-    Gc.train_idx = s.nonzero().view(-1) if Gc.y_train is not None else None
-    Gc.test_idx = s.eq(0).nonzero().view(-1) if Gc.y_train is not None else None
+    if hasattr(G, "soft_y") and G.soft_y is not None:
+        Gc.soft_y = coarsen_vector(G.soft_y, iC)
+        Gc.y = torch.argmax(Gc.soft_y, dim=1) if Gc.soft_y is not None else Gc.y
+    else:
+        Gc.soft_y = None
+        Gc.y = G.y if hasattr(G, "y") else None
+    if hasattr(G, "y_train") and G.y_train is not None:
+        Gc.y_train = coarsen_vector(G.y_train, iC) if G.y_train is not None else None
+        s = Gc.y_train.sum(1)
+        Gc.train_idx = s.nonzero().view(-1) if Gc.y_train is not None else None
+        Gc.test_idx = s.eq(0).nonzero().view(-1) if Gc.y_train is not None else None
 
     # Gc.W, Gc.L, Gc.dw = graph_params(Gc)
 
@@ -286,6 +391,9 @@ def construct_G(G: Data, iC: SparseTensor):
     if hasattr(G, "pos") and G.pos is not None:
         # pos = torch.sparse.mm(iC, G.pos)
         Gc.pos = coarsen_vector(G.pos, iC)
+
+    if hasattr(G, "colors") and G.colors is not None:
+        Gc.colors = coarsen_vector(G.colors, iC)
 
     return Gc
 
@@ -309,6 +417,9 @@ def calc_L(L, C_plus):
     L_c = (
         L_c + L_c.t()
     ) / 2  # this is only needed to avoid pygsp complaining for tiny errors
+    # Coalesce to ensure consistent sparse format for downstream operations
+    if L_c.is_sparse:
+        L_c = L_c.coalesce()
     return L_c
 
 
@@ -414,10 +525,6 @@ def get_coarsening_matrix(partitioning, N):
     # Keep only the rows that weren't contracted
     keep_indices = torch.nonzero(rows_to_keep).squeeze()
 
-    # Ensure keep_indices is always 1D (handle case of single element)
-    if keep_indices.dim() == 0:
-        keep_indices = keep_indices.unsqueeze(0)
-
     # Extract the values and indices from C
     C = C.coalesce()  # Ensure C is in COO format
     indices = C.indices()
@@ -441,269 +548,16 @@ def get_coarsening_matrix(partitioning, N):
     return C_final
 
 
-def plot_coarsening(
-    Gall, Call, size=3, edge_width=0.8, node_size=20, alpha=0.55, title=""
-):
-    """
-    Plot a (hierarchical) coarsening evolution efficiently
-
-    Parameters
-    ----------
-    Gall : list of torch_geometric.data.Data
-        All graphs involved in the multilevel coarsening, from original to final
-    Call : list of torch.sparse tensors
-        Coarsening matrices for each level
-    size : float
-        Size multiplier for figure dimensions
-    edge_width : float
-        Width of edges in the plot
-    node_size : int
-        Base size of nodes
-    alpha : float
-        Transparency value
-    title : str
-        Title prefix for the plots
-
-    Returns
-    -------
-    fig : matplotlib figure
-    """
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D
-
-    # Colors signify the size of a coarsened subgraph
-    colors = ["black", "green", "blue", "red", "orange", "purple", "brown", "pink"]
-
-    n_levels = len(Gall) - 1
-    if n_levels == 0:
-        return None
-
-    # Check if graphs have positions
-    if not hasattr(Gall[0], "pos") or Gall[0].pos is None:
-        print("Warning: No node positions found. Cannot plot graph coarsening.")
-        return None
-
-    # Determine if 2D or 3D
-    pos_dim = Gall[0].pos.shape[1]
-    if pos_dim not in [2, 3]:
-        print(
-            f"Warning: Unsupported position dimension {pos_dim}. Only 2D and 3D are supported."
-        )
-        return None
-
-    # Create figure
-    fig = plt.figure(figsize=(n_levels * size * 3, size * 2))
-
-    # Plot each level
-    for level in range(n_levels):
-        G = Gall[level]
-        Gc = Gall[level + 1]
-        C = Call[level]
-
-        # Create subplot
-        if pos_dim == 2:
-            ax = fig.add_subplot(1, n_levels + 1, level + 1)
-        else:
-            ax = fig.add_subplot(1, n_levels + 1, level + 1, projection="3d")
-
-        ax.axis("off")
-        ax.set_title(f"{title} | level = {level}, N = {G.num_nodes}")
-
-        # Get positions
-        pos = G.pos.cpu().numpy()
-
-        # Plot edges efficiently
-        if G.edge_index.shape[1] > 0:
-            edge_coords = pos[G.edge_index.cpu().numpy()]
-
-            if pos_dim == 2:
-                # Plot all edges at once using LineCollection for efficiency
-                from matplotlib.collections import LineCollection
-
-                lines = LineCollection(
-                    edge_coords.transpose(1, 0, 2),
-                    colors="black",
-                    alpha=alpha,
-                    linewidths=edge_width,
-                )
-                ax.add_collection(lines)
-            else:
-                # For 3D, we need to plot edges one by one (matplotlib limitation)
-                for edge_coord in edge_coords.transpose(1, 0, 2):
-                    ax.plot(
-                        *edge_coord.T, color="black", alpha=alpha, linewidth=edge_width
-                    )
-
-        # Plot nodes colored by coarsening groups efficiently
-        C_dense = C.coalesce()
-        C_indices = C_dense.indices().cpu().numpy()
-        C_values = C_dense.values().cpu().numpy()
-
-        # Group nodes by which coarse node they belong to
-        node_groups = {}
-        for coarse_idx, fine_idx in zip(C_indices[0], C_indices[1]):
-            if coarse_idx not in node_groups:
-                node_groups[coarse_idx] = []
-            node_groups[coarse_idx].append(fine_idx)
-
-        # Plot each group with appropriate color and size
-        for coarse_idx, fine_nodes in node_groups.items():
-            fine_nodes = np.array(fine_nodes)
-            group_size = len(fine_nodes)
-            color_idx = min(group_size - 1, len(colors) - 1)
-            color = colors[color_idx]
-            size = node_size * group_size
-
-            node_pos = pos[fine_nodes]
-            if pos_dim == 2:
-                ax.scatter(node_pos[:, 0], node_pos[:, 1], c=color, s=size, alpha=alpha)
-            else:
-                ax.scatter(
-                    node_pos[:, 0],
-                    node_pos[:, 1],
-                    node_pos[:, 2],
-                    c=color,
-                    s=size,
-                    alpha=alpha,
-                )
-
-        # Set equal aspect ratio
-        if pos_dim == 2:
-            ax.set_aspect("equal")
-            # Set axis limits based on node positions
-            margin = 0.1
-            pos_range = pos.max(axis=0) - pos.min(axis=0)
-            ax.set_xlim(
-                pos[:, 0].min() - margin * pos_range[0],
-                pos[:, 0].max() + margin * pos_range[0],
-            )
-            ax.set_ylim(
-                pos[:, 1].min() - margin * pos_range[1],
-                pos[:, 1].max() + margin * pos_range[1],
-            )
-
-    # Plot the final coarsened graph
-    Gc = Gall[-1]
-    if pos_dim == 2:
-        ax = fig.add_subplot(1, n_levels + 1, n_levels + 1)
-    else:
-        ax = fig.add_subplot(1, n_levels + 1, n_levels + 1, projection="3d")
-
-    ax.axis("off")
-    ax.set_title(f"{title} | level = {n_levels}, n = {Gc.num_nodes}")
-
-    # Get final positions
-    final_pos = Gc.pos.cpu().numpy()
-
-    # Plot final edges
-    if Gc.edge_index.shape[1] > 0:
-        final_edge_coords = final_pos[Gc.edge_index.cpu().numpy()]
-
-        if pos_dim == 2:
-            from matplotlib.collections import LineCollection
-
-            lines = LineCollection(
-                final_edge_coords.transpose(1, 0, 2),
-                colors="black",
-                alpha=alpha,
-                linewidths=edge_width,
-            )
-            ax.add_collection(lines)
-        else:
-            for edge_coord in final_edge_coords.transpose(1, 0, 2):
-                ax.plot(*edge_coord.T, color="black", alpha=alpha, linewidth=edge_width)
-
-    # Plot final nodes
-    if pos_dim == 2:
-        ax.scatter(
-            final_pos[:, 0], final_pos[:, 1], c="black", s=node_size, alpha=alpha
-        )
-        ax.set_aspect("equal")
-        # Set axis limits
-        margin = 0.1
-        pos_range = final_pos.max(axis=0) - final_pos.min(axis=0)
-        ax.set_xlim(
-            final_pos[:, 0].min() - margin * pos_range[0],
-            final_pos[:, 0].max() + margin * pos_range[0],
-        )
-        ax.set_ylim(
-            final_pos[:, 1].min() - margin * pos_range[1],
-            final_pos[:, 1].max() + margin * pos_range[1],
-        )
-    else:
-        ax.scatter(
-            final_pos[:, 0],
-            final_pos[:, 1],
-            final_pos[:, 2],
-            c="black",
-            s=node_size,
-            alpha=alpha,
-        )
-
-    fig.tight_layout()
-    return fig
-
-
-def plot_coarsening_evolution(Gall, Call, save_path=None, **kwargs):
-    """
-    Enhanced wrapper for plotting coarsening evolution with additional features
-
-    Parameters
-    ----------
-    Gall : list of torch_geometric.data.Data
-        All graphs involved in the multilevel coarsening
-    Call : list of torch.sparse tensors
-        Coarsening matrices for each level
-    save_path : str, optional
-        Path to save the figure
-    **kwargs : dict
-        Additional arguments passed to plot_coarsening
-
-    Returns
-    -------
-    fig : matplotlib figure
-    stats : dict
-        Statistics about the coarsening process
-    """
-    import matplotlib.pyplot as plt
-
-    # Calculate coarsening statistics
-    stats = {
-        "levels": len(Gall) - 1,
-        "original_nodes": Gall[0].num_nodes,
-        "final_nodes": Gall[-1].num_nodes,
-        "reduction_ratio": Gall[0].num_nodes / Gall[-1].num_nodes,
-        "nodes_per_level": [G.num_nodes for G in Gall],
-        "edges_per_level": [G.num_edges for G in Gall],
-    }
-
-    # Create the plot
-    fig = plot_coarsening(Gall, Call, **kwargs)
-
-    if fig is not None:
-        # Add overall statistics as figure suptitle
-        fig.suptitle(
-            f"Graph Coarsening Evolution: {stats['original_nodes']} → {stats['final_nodes']} nodes "
-            f"(reduction: {stats['reduction_ratio']:.2f}×)",
-            fontsize=14,
-            y=0.95,
-        )
-
-        # Save if path provided
-        if save_path is not None:
-            fig.savefig(save_path, dpi=300, bbox_inches="tight")
-            print(f"Figure saved to {save_path}")
-
-    return fig, stats
-
-
 ################################################################################
 # Variation-based contraction algorithms
 ################################################################################
-
-
 def contract_variation_embeddings(
-    G: Data, A=None, K=10, r=0.5, algorithm="greedy", similarity_threshold=0.5
+    G: Data,
+    A=None,
+    r=0.5,
+    algorithm="greedy",
+    similarity_threshold=0.0,
+    max_sigma=float("inf"),
 ):
     """
     Sequential contraction with local variation and edge-based families.
@@ -713,8 +567,7 @@ def contract_variation_embeddings(
 
     See contract_variation() for documentation.
     """
-    N, deg, M = (
-        G.num_nodes,
+    deg, M = (
         G.dw,
         G.num_edges,
     )
@@ -723,17 +576,26 @@ def contract_variation_embeddings(
 
     # cost function for the edge
     def subgraph_cost(A, edge, w):
-        # edge, w = edge[:2].astype(torch.int64), edge[2]
-        # edge = G.edge_index
-        # w = G.edge_weight
         deg_new = 2 * deg[edge] - w
         L = torch.tensor([[deg_new[0], -w], [-w, deg_new[1]]])
         B = Pibot @ A[edge, :]
-        return torch.linalg.norm(B.T @ L @ B)
+        structural_cost = torch.linalg.norm(B.T @ L @ B) ** 2
+
+        # semantic cost
+        if hasattr(G, "embeddings") and G.embeddings is not None:
+            # Pi_C^{\perp} H for the two-node subgraph (edge)
+            Bh = Pibot @ G.embeddings[edge, :]
+
+            # compute || Pi_C^{\perp} H ||_{L_C}^2  = || B^T L B ||_F^2
+            semantic_cost = torch.linalg.norm(Bh.T @ L @ Bh) ** 2
+        else:
+            semantic_cost = 0.0
+
+        return [structural_cost, semantic_cost, structural_cost + semantic_cost]
 
     # edges = np.array(G.get_edge_list()[0:2])
     weights = torch.tensor(
-        [subgraph_cost(A, G.edge_index[:, e], G.edge_weight[e]) for e in range(M)]
+        [subgraph_cost(A, G.edge_index[:, e], G.edge_weight[e])[1] for e in range(M)]
     )
     # weights = torch.zeros(M)
     # for e in range(M):
@@ -745,15 +607,24 @@ def contract_variation_embeddings(
 
     elif algorithm == "greedy":
         # find a heavy weight matching
-        coarsening_list = matching_greedy(
-            G, weights=-weights, r=r, similarity_threshold=similarity_threshold
+        coarsening_list, sigma_l, done_flag = matching_greedy(
+            G,
+            weights=weights,
+            r=r,
+            similarity_threshold=similarity_threshold,
+            max_sigma=max_sigma,
         )
 
-    return coarsening_list
+    return coarsening_list, sigma_l, done_flag
 
 
 def contract_variation_edges(
-    G: Data, A=None, r=0.5, algorithm="greedy", similarity_threshold=0.5
+    G: Data,
+    A=None,
+    r=0.5,
+    algorithm="greedy",
+    similarity_threshold=0.0,
+    max_sigma=float("inf"),
 ):
     """
     Sequential contraction with local variation and edge-based families.
@@ -763,45 +634,53 @@ def contract_variation_edges(
 
     See contract_variation() for documentation.
     """
-    N, deg, M = (
-        G.num_nodes,
+    deg, M = (
         G.dw,
         G.num_edges,
     )
-    ones = torch.ones(2)
-    Pibot = torch.eye(2) - torch.outer(ones, ones) / 2
 
-    # cost function for the edge
-    def subgraph_cost(A, edge, w):
-        deg_new = 2 * deg[edge] - w
-        L = torch.tensor([[deg_new[0], -w], [-w, deg_new[1]]])
-        B = Pibot @ A[edge, :]
-        return torch.linalg.norm(B.T @ L @ B)
+    # Vectorized cost computation for all edges at once
+    # Mathematical derivation: for 2-node subgraph with Pibot projection,
+    # cost = 0.25 * (deg[i] + deg[j])^2 * ||A[i] - A[j]||^4
+    src = G.edge_index[0]  # source nodes, shape (M,)
+    tgt = G.edge_index[1]  # target nodes, shape (M,)
 
-    # edges = np.array(G.get_edge_list()[0:2])
-    weights = torch.tensor(
-        [subgraph_cost(A, G.edge_index[:, e], G.edge_weight[e]) for e in range(M)]
-    )
-    # weights = torch.zeros(M)
-    # for e in range(M):
-    #    weights[e] = subgraph_cost_old(G, A, edges[:,e])
+    # Compute A differences for all edges: shape (M, K)
+    A_diff = A[src] - A[tgt]
+
+    # Squared norms of differences: shape (M,)
+    diff_norm_sq = torch.sum(A_diff * A_diff, dim=1)
+
+    # Sum of degrees for each edge: shape (M,)
+    deg_sum = deg[src] + deg[tgt]
+
+    # Vectorized structural cost: 0.25 * (deg_sum)^2 * ||diff||^4
+    weights = 0.25 * (deg_sum**2) * (diff_norm_sq**2)
 
     if algorithm == "optimal":
         # identify the minimum weight matching
         coarsening_list = matching_optimal(G, weights=weights, r=r)
-
     elif algorithm == "greedy":
         # find a heavy weight matching
-        coarsening_list = matching_greedy(
-            G, weights=-weights, r=r, similarity_threshold=similarity_threshold
+        coarsening_list, sigma_l, done_flag = matching_greedy(
+            G,
+            weights=weights,
+            r=r,
+            max_sigma=max_sigma,
+            similarity_threshold=similarity_threshold,
         )
 
-    return coarsening_list
+    return coarsening_list, sigma_l, done_flag
 
 
 # TODO(WHT): include features for each node
 def contract_variation_linear(
-    G: Data, A, r=0.5, mode="neighborhood", similarity_threshold=0.5
+    G: Data,
+    A,
+    r=0.5,
+    mode="neighborhood",
+    similarity_threshold=0.0,
+    max_sigma=float("inf"),
 ):
     """
     Sequential contraction with local variation and general families.
@@ -867,7 +746,8 @@ def contract_variation_linear(
         else:
             L_P_A = L @ P_A_sub
 
-        return torch.norm(P_A_sub.t() @ L_P_A) / (nc - 1)
+        structural_cost = torch.norm(P_A_sub.t() @ L_P_A) / (nc - 1)
+        return structural_cost
 
     class CandidateSet:
         def __init__(self, candidate_list):
@@ -920,6 +800,10 @@ def contract_variation_linear(
     # n, n_target = N, (1-r)*N
     n_reduce = np.floor(r * N)  # how many nodes do we need to reduce/eliminate?
     X = G.embeddings if hasattr(G, "embeddings") else G.x
+    max_sigma2 = max_sigma**2
+    sigma_l_2 = 0.0
+    count = 0
+    done_flag = False
 
     while len(family) > 0:
 
@@ -928,6 +812,12 @@ def contract_variation_linear(
 
         if len(i_set) <= 1:
             continue
+
+        # check cost threshold
+        if (sigma_l_2 + i_cset.cost) > max_sigma2:
+            if count == 0:
+                done_flag = True
+            break
 
         # check if marked
         i_marked = marked[i_set]
@@ -960,6 +850,9 @@ def contract_variation_linear(
             if n_reduce <= 0:
                 break
 
+            count += 1
+            sigma_l_2 += i_cset.cost
+
         # may be worth to keep this set
         # else:
         #     i_set = i_set[~i_marked]
@@ -970,8 +863,8 @@ def contract_variation_linear(
         #         i_cset.set = i_set
         #         i_cset.cost = subgraph_cost(i_set)
         #         family.add(i_cset)
-
-    return coarsening_list
+    sigma_l = np.sqrt(sigma_l_2)
+    return coarsening_list, sigma_l, done_flag
 
 
 ################################################################################
@@ -991,8 +884,17 @@ def get_proximity_measure(G: Data, name, K=10):
     num_vectors = K  # int(1*K*np.log(K))
     if "lanczos" in name:
         L = G.L  # Assuming this returns a sparse tensor
-        X_init = torch.randn(N, K, device=L.device)
-        l_lan, X_lan = torch.lobpcg(L, X_init, largest=False, niter=1000, tol=1e-2)
+        # Ensure sparse tensor is coalesced for lobpcg compatibility
+        if L.is_sparse:
+            L = L.coalesce()
+        # torch.lobpcg has issues with sparse tensors in some PyTorch versions.
+        # Use dense eigendecomposition for reliability.
+        L_dense = L.to_dense() if L.is_sparse else L
+        # Get smallest K eigenvalues/eigenvectors (excluding zero eigenvalue)
+        l_all, X_all = torch.linalg.eigh(L_dense)
+        # Take the smallest K+1 eigenvectors (skip the first one which is constant)
+        l_lan = l_all[1 : K + 1]
+        X_lan = X_all[:, 1 : K + 1]
     elif "cheby" in name:
         e = "laplacian of G"
         X_cheby = generate_test_vectors(
@@ -1007,7 +909,7 @@ def get_proximity_measure(G: Data, name, K=10):
             G, num_vectors=num_vectors, method="GS", iterations=1
         )
     if "expected" in name:
-        X = X_lan
+        X = G.embeddings
         assert not torch.isnan(X).any()
         assert X.shape[0] == N
         K = X.shape[1]
@@ -1311,7 +1213,13 @@ def matching_optimal(edge_index, num_nodes, weights, r=0.4):
     return matching
 
 
-def matching_greedy(G: Data, weights, r=0.4, similarity_threshold=0.5):
+def matching_greedy(
+    G: Data,
+    weights,
+    r=0.4,
+    similarity_threshold=0.0,
+    max_sigma=float("inf"),
+):
     """
     Generates a matching greedily by selecting at each iteration the edge
     with the largest weight and then removing all adjacent edges from the
@@ -1326,39 +1234,60 @@ def matching_greedy(G: Data, weights, r=0.4, similarity_threshold=0.5):
         node features, used for computing similarity
     r : float
         The desired dimensionality reduction (r = 1 - n/N)
-    similarity_threshold : float
+    similarity_threshold : float, optional
         The threshold for considering two nodes as similar
+    max_sigma : float
+        The threshold for considering two nodes as similar
+    max_cost : float, optional
+        The maximum variation cost after full coarsening
+    cur_cost : float, optional
+        The current variation cost before coarsening
 
     Notes:
     * The complexity of this is O(M)
     * Depending on G, the algorithm might fail to return ratios>0.3
     """
 
+    done_flag = False
     N = G.num_nodes
     X = G.embeddings if hasattr(G, "embeddings") else G.x
 
     # the edge set
-    edges = G.edge_index
+    edges = G.edge_index.clone()
 
-    idx = torch.argsort(-weights)
-    # idx = np.argsort(weights)[::-1]
+    idx = torch.argsort(weights)
     edges = edges[:, idx]
+    weights = weights[idx]
 
     # the candidate edge set
     candidate_edges = edges.T.tolist()
 
     # the matching edge set (this is a list of arrays)
     matching = []
+    max_sigma2 = max_sigma**2
 
     # which vertices have been selected
     marked = torch.zeros(N, dtype=torch.bool)
 
-    n, n_target = N, (1 - r) * N
+    n = N
+    if r is not None:
+        n_target = (1 - r) * N
+    else:
+        n_target = None
     count = 0
-    while len(candidate_edges) > 0:
-
+    sigma_l_2 = 0  # cumulative cost sigma^2
+    T = len(candidate_edges)
+    while count <= T - 1:
         # pop a candidate edge
-        [i, j] = candidate_edges.pop(0)
+        [i, j] = candidate_edges[count]
+        cost = weights[count]
+        count += 1
+
+        # check cost threshold
+        if (sigma_l_2 + cost) > max_sigma2:
+            if count == 1:
+                done_flag = True
+            break
 
         # check if marked
         if any(marked[[i, j]]):
@@ -1369,17 +1298,19 @@ def matching_greedy(G: Data, weights, r=0.4, similarity_threshold=0.5):
         else:
             sim = 1.0
 
-        if sim > similarity_threshold:
+        if sim >= similarity_threshold:
             marked[[i, j]] = True
             n -= 1
 
             # add it to the matching
             # matching.append(torch.tensor([i, j]))
-            matching.append({"list": [i, j], "similarity": sim, "cost": weights[count]})
+            matching.append({"list": [i, j], "similarity": sim, "cost": cost})
 
-        count += 1
+            sigma_l_2 += cost
         # termination condition
-        if n <= n_target:
-            break
+        if r is not None:
+            if n <= n_target:
+                break
 
-    return matching
+    sigma_l = sigma_l_2**0.5
+    return matching, sigma_l, done_flag

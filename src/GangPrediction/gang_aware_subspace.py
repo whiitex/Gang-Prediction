@@ -116,7 +116,7 @@ def build_gang_aware_basis(
     if not ensure_orthogonal:
         tol = 1e-6
         diag = torch.abs(torch.diag(R))
-        rank = (diag > tol).sum()
+        rank = (diag > tol)
 
         V = V[:, :rank]
 
@@ -203,7 +203,7 @@ def _build_seed_vectors(
     add_discrimination_seed: bool = True,
     normalize_seeds: bool = True,
     device: str = "cpu",
-    ensure_orthogonal: bool = False,
+    ensure_orthogonal: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Build seed vectors from pattern node sets.
