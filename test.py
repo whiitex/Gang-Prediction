@@ -16,6 +16,7 @@ from scipy.ndimage import uniform_filter1d
 
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
 
+from src.GangPrediction.experiment_utils import get_node_to_supernode_mapping
 from src.GangPrediction.graph_utils import *
 from src.GangPrediction.utils.utils import *
 from src.GangPrediction.coarsening_utils import *
@@ -95,32 +96,6 @@ def load_alert_patterns(alert_file, node_to_index):
     valid_pattern_types = {k: pattern_types[k] for k in valid_patterns.keys()}
 
     return valid_patterns, valid_pattern_types
-
-
-def get_node_to_supernode_mapping(Call):
-    """
-    Get the mapping from original nodes to super nodes after coarsening.
-
-    Args:
-        Call: list containing cumulative coarsening matrix [C_cumulative]
-              C_cumulative has shape (n_coarse, n_original) where entry (i,j) > 0
-              means original node j is part of super node i
-
-    Returns:
-        mapping: tensor where mapping[i] = super node index for original node i
-    """
-    if len(Call) == 0:
-        return None
-
-    # The last matrix in Call is already the cumulative coarsening matrix
-    C_total = Call[-1]
-
-    # For each original node, find which super node it belongs to
-    # C_total is (n_coarse x n_original), so argmax over dim=0 gives super node assignment
-    C_dense = C_total.to_dense()
-    mapping = torch.argmax(C_dense, dim=0)
-
-    return mapping
 
 
 def evaluate_normal_pattern_detection_gt(
@@ -575,7 +550,7 @@ for ep_per_lev in epochs_per_lev:
             levels=max_level,
             K=100,
             nhid=256,
-            lr=0.01,  
+            lr=0.01,
             wd=1e-4,
             epoch_per_level=ep_per_lev,
             method=method,
@@ -641,7 +616,7 @@ for ep_per_lev in epochs_per_lev:
                 # Call[level_idx-1] maps original nodes to supernodes at this level
                 if level_idx > 0:
                     node_to_supernode = get_node_to_supernode_mapping(
-                        [Call[level_idx - 1]]
+                        Call[level_idx - 1]
                     )
                 else:
                     node_to_supernode = None

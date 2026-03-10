@@ -119,20 +119,45 @@ def build_gang_picture_graph(num_node_features: int = 1):
     )
 
     # ----- Patterns (as requested) -----
-    # alert_patterns = {
-    #     "left_diamond": [0, 1, 2, 3],  # left circled diamond
-    #     "top_pentagon": [10, 11, 12, 13, 14],  # top circled pentagon
-    #     "bottom_triangle": [15, 16, 17],  # bottom circled triangle
-    # }
-    # normal_pattern = {"center": [4, 5, 6, 7, 8, 9]}  # center big subgraph
-    # ----- Patterns (as requested) -----
     alert_patterns = {
-        "left_diamond": [12, 13, 14],  # left circled diamond
-        "top_pentagon": [2, 3, 4, 5, 9],  # top circled pentagon
-        "bottom_triangle": [6, 10, 11],  # bottom circled triangle
-        "bottom_triangle2": [7, 8, 15, 16, 17],  # bottom circled triangle
+        "left_diamond": [0, 1, 2, 3],  # left circled diamond
+        "top_pentagon": [10, 11, 12, 13, 14],  # top circled pentagon
+        "bottom_triangle": [15, 16, 17],  # bottom circled triangle
     }
-    normal_pattern = {"center": [0, 1]}  # center big subgraph
+    normal_pattern = {"center": [4, 5, 6, 7, 8, 9]}  # center big subgraph
+    # ----- Patterns (as requested) -----
+    # alert_patterns = {
+    #     "left_diamond": [12, 13, 14],  # left circled diamond
+    #     "top_pentagon": [2, 3, 4, 5, 9],  # top circled pentagon
+    #     "bottom_triangle": [6, 10, 11],  # bottom circled triangle
+    #     "bottom_triangle2": [7, 8, 15, 16, 17],  # bottom circled triangle
+    # }
+    # normal_pattern = {"center": [0, 1]}  # center big subgraph
+
+    # R = [[0,0,0, ..., 1,1,1,0,0,0],[0, 1,1,1,1,0,0,0,1,0],[],[]]
+    # 0,1,0,0
+    # GNN (G)-> H = [h_v forall v in G.V]  # node embeddings from a GNN
+
+    R = [
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+    ]
 
     # Optional: node labels (1=alert node, 0=normal node)
     y = torch.zeros(n, dtype=torch.long)
@@ -368,10 +393,11 @@ def coarsen(
     return C, Gc, Call, Gall, epsilons
 
 
+
 def coarsen_and_plot(
     G,
     DATA,
-    levels=13,
+    levels=16,
     # method="variation_embedding",
     method="variation_edges",
     K=5,

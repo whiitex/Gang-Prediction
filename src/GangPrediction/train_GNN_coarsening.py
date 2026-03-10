@@ -226,7 +226,7 @@ def train_GNN_coarsening_aware_loss(
 
     for level in range(1, levels + 1):
         # Simple ratio schedule (original formula)
-        ratio = np.log(level) / 2000 + 0.0001
+        ratio = np.log(level) / 3000 + 0.0001
         if ratio > 0.0025:
             ratio = 0.0025
         # ratio = 1

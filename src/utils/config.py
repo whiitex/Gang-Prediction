@@ -52,25 +52,49 @@ def build_data_paths(
     if clients is None:
         clients = discover_clients(preprocessed_dir)
 
-    # Determine if we need edges (for GNN models)
-    needs_edges = client_type == "TorchGeometricClient"
+    # Determine path key names based on client type
+    # SklearnClient uses trainset/valset/testset (no edges)
+    # TorchClient uses trainset_nodes/valset_nodes/testset_nodes (no edges)
+    # TorchGeometricClient uses trainset_nodes/valset_nodes/testset_nodes (plus edges)
+    is_sklearn = client_type == "SklearnClient"
+    is_geometric = client_type == "TorchGeometricClient"
+    needs_edges = is_geometric
+
+    # Key names differ by client type
+    if is_sklearn:
+        train_key = "trainset"
+        val_key = "valset"
+        test_key = "testset"
+    else:  # TorchClient or TorchGeometricClient
+        train_key = "trainset_nodes"
+        val_key = "valset_nodes"
+        test_key = "testset_nodes"
 
     paths = {}
 
     if setting == "centralized":
-        paths["trainset_nodes"] = str(preprocessed_dir / "centralized" / "trainset_nodes.parquet")
+        centralized_dir = preprocessed_dir / "centralized"
+        paths[train_key] = str(centralized_dir / "trainset_nodes.parquet")
+        paths[val_key] = str(centralized_dir / "valset_nodes.parquet")
+        paths[test_key] = str(centralized_dir / "testset_nodes.parquet")
         if needs_edges:
-            paths["trainset_edges"] = str(preprocessed_dir / "centralized" / "trainset_edges.parquet")
+            paths["trainset_edges"] = str(centralized_dir / "trainset_edges.parquet")
+            paths["valset_edges"] = str(centralized_dir / "valset_edges.parquet")
+            paths["testset_edges"] = str(centralized_dir / "testset_edges.parquet")
 
     elif setting in ["federated", "isolated"]:
         paths["clients"] = {}
         for client in clients:
             client_dir = preprocessed_dir / "clients" / client
             paths["clients"][client] = {
-                "trainset_nodes": str(client_dir / "trainset_nodes.parquet")
+                train_key: str(client_dir / "trainset_nodes.parquet"),
+                val_key: str(client_dir / "valset_nodes.parquet"),
+                test_key: str(client_dir / "testset_nodes.parquet")
             }
             if needs_edges:
                 paths["clients"][client]["trainset_edges"] = str(client_dir / "trainset_edges.parquet")
+                paths["clients"][client]["valset_edges"] = str(client_dir / "valset_edges.parquet")
+                paths["clients"][client]["testset_edges"] = str(client_dir / "testset_edges.parquet")
 
     return paths
 
@@ -78,8 +102,7 @@ def build_data_paths(
 def load_training_config(
     config_path: str,
     model_type: str,
-    setting: str,
-    client_type: str
+    setting: str
 ) -> Dict:
     """
     Load training configuration with auto-discovery and path construction.
@@ -88,12 +111,12 @@ def load_training_config(
     - Experiment root: Auto-detected from config path (../../ from config file)
     - Clients: Auto-discovered from {experiment_root}/preprocessed/clients/
     - Data paths: Auto-constructed based on setting and client_type
+    - Client type: Read from model's default.client_type in config
 
     Args:
         config_path: Path to config YAML file (typically experiments/{name}/config/models.yaml)
         model_type: Name of model (e.g., "GraphSAGE")
         setting: Training setting (centralized, federated, isolated)
-        client_type: Type of client (TorchClient, TorchGeometricClient, SklearnClient)
 
     Returns:
         Complete configuration dictionary with auto-constructed paths
@@ -127,6 +150,11 @@ def load_training_config(
 
     # Build configuration by merging default -> setting
     kwargs = model_config.get('default', {}).copy()
+
+    # Read client_type from config
+    client_type = kwargs.get('client_type')
+    if client_type is None:
+        raise ValueError(f"client_type not found in {model_type}.default.client_type")
 
     if setting in model_config:
         setting_config = model_config[setting]
@@ -197,7 +225,7 @@ def load_data_config(config_path: str) -> Dict:
 
     # Auto-construct paths based on experiment root
     config['input']['directory'] = str(experiment_root / 'config')
-    config['temporal']['directory'] = str(experiment_root / 'spatial')
+    config['spatial']['directory'] = str(experiment_root / 'spatial')
     config['output']['directory'] = str(experiment_root / 'temporal')
 
     return config

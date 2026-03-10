@@ -13,7 +13,7 @@ from torch_geometric.utils import (
 )
 from pygsp import graphs
 import scipy as sp
-from src.utils.logger import getLOGGER
+from src.GangPrediction.utils.logger import getLOGGER
 
 now = datetime.now().strftime("%Y%m%d_%H%M%S")
 

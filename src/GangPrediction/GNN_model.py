@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, SAGEConv
+from torch_geometric.nn import GCNConv, SAGEConv, GATConv, GraphConv, GINConv
 import torch.optim as optim
 
 # torch geometric
@@ -15,38 +15,53 @@ from src.ml.metrics.metrics import average_precision_score
 
 
 class GCN(nn.Module):
-    def __init__(self, nfeat, nhid, nclass, dropout=0.5):
+    def __init__(self, nfeat, nhid, nclass, dropout=0.5, n_layers=4):
         super(GCN, self).__init__()
-        self.conv1 = GCNConv(nfeat, nhid)
-        self.conv2 = GCNConv(nhid, nhid)
-        self.conv3 = GCNConv(nhid, nhid)
-        self.conv4 = GCNConv(nhid, nclass)
+        if n_layers < 2:
+            raise ValueError("n_layers must be at least 2")
         self.dropout = dropout
+        self.n_layers = n_layers
+
+        # Build list of conv layers dynamically
+        self.convs = nn.ModuleList()
+        # GINConv requires an MLP as input
+        self.convs.append(
+            GINConv(
+                nn.Sequential(nn.Linear(nfeat, nhid), nn.ReLU(), nn.Linear(nhid, nhid))
+            )
+        )  # First layer
+        for _ in range(n_layers - 2):  # Hidden layers
+            self.convs.append(
+                GINConv(
+                    nn.Sequential(
+                        nn.Linear(nhid, nhid), nn.ReLU(), nn.Linear(nhid, nhid)
+                    )
+                )
+            )
+        self.convs.append(
+            GINConv(
+                nn.Sequential(nn.Linear(nhid, nhid), nn.ReLU(), nn.Linear(nhid, nclass))
+            )
+        )  # Output layer
 
     def forward(self, x, edge_index, edge_weight=None):
         """Compute logits for each node."""
-        x = F.relu(self.conv1(x, edge_index, edge_weight))
-        x = F.dropout(x, self.dropout, training=self.training)
-        x = F.relu(self.conv2(x, edge_index, edge_weight))
-        x = F.dropout(x, self.dropout, training=self.training)
-        x = F.relu(self.conv3(x, edge_index, edge_weight))
-        x = self.conv4(x, edge_index, edge_weight)
+        for i, conv in enumerate(self.convs[:-1]):
+            x = F.relu(conv(x, edge_index))
+            x = F.dropout(x, self.dropout, training=self.training)
+        x = self.convs[-1](x, edge_index)
         return x
-        # return F.log_softmax(x, dim=1)
 
     def get_embeddings(self, x, edge_index, edge_weight=None):
         """Return intermediate node embeddings (pre-classifier)."""
-        # x = x.to(next(self.parameters()).device)  # send x to the model's device
-        # edge_index = edge_index.to(x.device)
-        # x = F.relu(self.conv1(x, edge_index, edge_weight))
-        x = F.relu(self.conv1(x, edge_index, edge_weight))
-        x = F.relu(self.conv2(x, edge_index, edge_weight))
-        x = F.relu(self.conv3(x, edge_index, edge_weight))
+        for conv in self.convs[:-2]:
+            x = F.relu(conv(x, edge_index))
+        x = self.convs[-2](x, edge_index)
         return x
 
     def reset_parameters(self):
-        self.conv1.reset_parameters()
-        self.conv2.reset_parameters()
+        for conv in self.convs:
+            conv.reset_parameters()
 
 
 def train_gnn_1_epoch(

@@ -5,6 +5,9 @@ import panel as pn
 import datashader as ds
 from sklearn.preprocessing import StandardScaler
 from scipy.stats import wasserstein_distance
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 try:
     import umap
@@ -116,13 +119,13 @@ class TransactionNetwork():
                 # Keep only feature columns (exclude metadata)
                 feature_cols = [col for col in df_features.columns
                                if col not in ['account', 'bank', 'is_sar', 'train_mask', 'val_mask', 'test_mask']]
-                print(f"Loaded {len(feature_cols)} preprocessed features for {len(df_features)} accounts")
+                logger.info(f"Loaded {len(feature_cols)} preprocessed features for {len(df_features)} accounts")
                 return df_features
             except Exception as e:
-                print(f"Warning: Could not load preprocessed features: {e}")
+                logger.warning(f"Could not load preprocessed features: {e}")
                 return None
         else:
-            print(f"Warning: Preprocessed features not found at {features_path}")
+            logger.warning(f"Preprocessed features not found at {features_path}")
             return None
 
     def _add_plot_info(self, plot, title, description, extra_button=None):

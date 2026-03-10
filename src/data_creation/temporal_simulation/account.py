@@ -4,20 +4,22 @@ Account class for AML simulation
 import numpy as np
 from collections import deque
 from .utils import TruncatedNormal, sigmoid
-from .salary_distribution import SalaryDistribution
 
 
 class Account:
     """Represents a bank account in the simulation"""
 
     def __init__(self, account_id, customer_id, initial_balance,
-                 is_sar, bank_id, random_state=None, n_steps_balance_history=28):
+                 is_sar, bank_id, random_state=None, n_steps_balance_history=28,
+                 salary=None, age=None):
         self.account_id = account_id
         self.customer_id = customer_id
         self.balance = initial_balance
         self.is_sar = is_sar
         self.bank_id = bank_id
         self.cash_balance = 0.0
+        self.salary = salary  # Monthly salary from demographics (or None to sample)
+        self.age = age  # Age from demographics
 
         # Random state for reproducibility
         self.random = np.random.RandomState(random_state)
@@ -113,11 +115,9 @@ class Account:
         self.days_until_phone_change = self._sample_days_until_phone_change()
         self.days_until_bank_change = self._sample_days_until_bank_change()
 
-        # Sample monthly salary from realistic Swedish salary distribution
-        # Matches Java implementation: SalaryDistribution().sample()
-        salary_dist = SalaryDistribution()
-        self.monthly_income = salary_dist.sample(self.random)
-        self.monthly_income_sar = salary_dist.sample(self.random)
+        # Use demographics-assigned salary (required)
+        self.monthly_income = self.salary
+        self.monthly_income_sar = self.salary
 
         # Compute monthly outcome as function of monthly income
         # Matches Java: TruncatedNormal(0.5 * income, 0.1 * income, 0.1 * income, 0.9 * income)

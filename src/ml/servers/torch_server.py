@@ -4,9 +4,12 @@ import numpy as np
 import torch
 from src.ml.metrics import average_precision_score
 from src.utils import decrease_lr, filter_args, set_random_seed
+from src.utils.logging import get_logger
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_recall_curve, precision_score, recall_score, roc_curve
 from tqdm import tqdm
 from typing import Any, Dict, List, Tuple
+
+logger = get_logger(__name__)
 
 
 class TorchServer():
@@ -25,11 +28,21 @@ class TorchServer():
         self.device = device
         self.n_workers = len(clients) if n_workers is None else n_workers
         self.results = {}
-        
+
+        # Auto-detect input_dim from first client's model (clients already auto-detected from their data)
+        if clients and hasattr(clients[0], 'model') and hasattr(clients[0].model, 'input_layer'):
+            input_layer = clients[0].model.input_layer
+            # Handle both torch.nn.Linear (in_features) and torch_geometric.nn.Linear (in_channels)
+            actual_input_dim = getattr(input_layer, 'in_features', None) or getattr(input_layer, 'in_channels', None)
+            if actual_input_dim and 'input_dim' in kwargs and kwargs['input_dim'] != actual_input_dim:
+                logger.info(f"Server: Using input_dim={actual_input_dim} from client (config had {kwargs['input_dim']})")
+            if actual_input_dim:
+                kwargs['input_dim'] = actual_input_dim
+
         self.global_model = Model(**filter_args(Model, kwargs)).to(self.device)
         Optimizer = getattr(torch.optim, optimizer)
         self.optimizer = Optimizer(self.global_model.parameters(), **filter_args(Optimizer, kwargs))
-        
+
         self.clients = clients
 
     def compute_gradients(self, clients: List, seed: int) -> Tuple[List, List]:

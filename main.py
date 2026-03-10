@@ -48,7 +48,7 @@ warnings.filterwarnings("ignore")
 # Configuration
 # ============================================================================
 
-EXPERIMENT = "tutorial_demo5"
+EXPERIMENT = "tutorial_demo12"
 # METHOD = "variation_neighborhood"
 # METHOD = "min_expected_gradient_loss"
 # METHOD = "edge_gangs"
@@ -60,11 +60,11 @@ THRESHOLD = 0.0  # Coarsening threshold
 MAX_EPSILONS = [float("inf")]  # Max coarsening epsilons
 # Training hyperparameters
 TRAIN_CONFIG = {
-    "K": 100,
+    "K": 200,
     "nhid": 16,
-    "lr": 0.003,
+    "lr": 0.001,
     "wd": 1e-6,
-    "dropout": 0.1,
+    "dropout": 0.25,
     # "grad_clip": 1.0,
     # "warmup_epochs": 3,
     "initial_epochs": 5,
@@ -73,7 +73,7 @@ TRAIN_CONFIG = {
     "loss_window": 10,
     "loss_threshold": 0.002,
     "alpha": 1.0,  # Smoothing strength (higher = smoother patterns)
-    "compression_method": "svd",  # "svd" for PCA-style, "lda" for Fisher LDA
+    "compression_method": "svd",  # "svd" for PCA-style, "lda" for Fisher LDA       
 }
 
 # Pattern detection thresholds

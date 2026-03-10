@@ -11,6 +11,7 @@ import yaml
 import os
 import sys
 import logging
+import pickle
 from scipy import stats
 
 from collections import Counter, defaultdict
@@ -19,11 +20,11 @@ from .utils.nominator import Nominator
 from .utils.normal_model import NormalModel
 from .utils.random_amount import RandomAmount
 from .utils.rounded_amount import RoundedAmount
+from .ml_account_selector import MoneyLaunderingAccountSelector
+from .demographics_assigner import assign_kyc_from_demographics
 
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 # Attribute keys
 MAIN_ACCT_KEY = "main_acct"  # Main account ID (SAR typology subgraph attribute)
@@ -228,9 +229,7 @@ class TransactionGenerator:
         self.default_start_range = parse_int(default_conf.get("start_range"))
         self.default_end_range = parse_int(default_conf.get("end_range"))
         self.default_model = parse_int(default_conf.get("transaction_model"))
-        self.default_prob_sar_participate = parse_float(default_conf.get("prob_participate_in_multiple_sars"))
-        self.sar_participation = {0: []}
-        
+
         # The ratio of amount intermediate accounts receive
         self.margin_ratio = parse_float(default_conf.get("margin_ratio", DEFAULT_MARGIN_RATIO))
         if not 0.0 <= self.margin_ratio <= 1.0:
@@ -253,9 +252,9 @@ class TransactionGenerator:
         self.type_file = input_conf["transaction_type"]  # Transaction type
         self.is_aggregated = input_conf["is_aggregated_accounts"]  # Flag whether the account list is aggregated
 
-        # Get output file names
-        output_conf = self.conf["temporal"]  # The output directory of the graph generator is temporal one
-        self.output_dir = os.path.join(output_conf["directory"])  # The directory name of temporal files
+        # Get output file names (spatial simulation outputs)
+        output_conf = self.conf["spatial"]
+        self.output_dir = os.path.join(output_conf["directory"])  # Spatial output directory
         self.out_tx_file = output_conf["transactions"]  # All transaction list CSV file
         self.out_account_file = output_conf["accounts"]  # All account list CSV file
         self.out_alert_member_file = output_conf["alert_members"]  # Account list of AML typology members CSV file
@@ -274,6 +273,13 @@ class TransactionGenerator:
         # TODO: Move the mapping of AML pattern to configuration JSON file
         self.alert_types = {"fan_out": 1, "fan_in": 2, "cycle": 3, "bipartite": 4, "stack": 5,
                             "random": 6, "scatter_gather": 7, "gather_scatter": 8}  # Pattern name and model ID
+
+        # Money laundering account selector (initialized later after graph is built)
+        # Always uses weighted selection based on structure/KYC when prepared
+        self.ml_selector = None
+
+        # Demographics-based KYC assignment (required)
+        self.demographics_csv = self.conf.get('demographics', {}).get('csv_path')
 
         self.acct_file = os.path.join(self.input_dir, self.account_file)
 
@@ -343,97 +349,53 @@ class TransactionGenerator:
 
 
     def get_typology_members(self, num, bank_id=""):
-        """Choose accounts randomly as members of AML typologies from one or multiple banks.
+        """Choose accounts as members of AML typologies using weighted selection.
+
+        The ML selector applies participation decay after each selection, naturally
+        spreading participation across accounts without explicit bin tracking.
+
         :param num: Number of total account vertices (including the main account)
-        :param bank_id: If specified, it chooses members from a single bank with the ID.
-        If empty (default), it chooses members from all banks randomly.
+        :param bank_id: If specified, chooses members from a single bank with the ID.
+            If empty (default), chooses members from all banks.
         :return: Main account and list of member account IDs
         """
         if num <= 1:
             raise ValueError("The number of members must be more than 1")
 
-        if bank_id in self.bank_to_accts:  # Choose members from the same bank as the main account
-            bank_accts = self.bank_to_accts[bank_id] # Get account set of the specified bank
-            members = []
-            for m in range(num):
-                bin = 0
-                while random.random() > stats.logser.cdf(bin+1, self.default_prob_sar_participate):
-                    if bin+1 not in self.sar_participation: # if there are no accounts in the next bin, remain in the current
-                        break
-                    elif all([candidate not in bank_accts for candidate in self.sar_participation[bin+1]]): # if all accounts in the next bin are not in the bank, remain in the current
-                        break
-                    elif all([candidate in members for candidate in self.sar_participation[bin+1]]): # if all accounts in the next bin are already participating, remain in the current
-                        break
-                    else:
-                        bin += 1
-                
-                candidate = None 
-                while candidate is None:
-                    if bin == 0:
-                        available_set = set(bank_accts) - set(members) # get the set of accounts that are in the bank and not already participating
-                    else:
-                        available_set = set(self.sar_participation[bin]) - set(members) # get the set of accounts that are in the current bin and not already participating
-                    
-                    if available_set == set() and (bin+1) in self.sar_participation: # if there are no accounts in the current bin and there are accounts in the next bin
-                        bin += 1
-                    elif available_set == set() and (bin+1) not in self.sar_participation:
-                        bin = max(bin-1, 0) # if there are no accounts in the current bin and no accounts in next bin, move to the previous bin
-                    else:
-                        candidate = random.choice(list(available_set)) # choose a random account from the available set
-                members.append(candidate)
-                
-            for member in members:
-                bins = list(self.sar_participation.keys())
-                for bin in bins:
-                    if member in self.sar_participation[bin]:
-                        if bin+1 not in self.sar_participation:
-                            self.sar_participation[bin+1] = [member]
-                        else:
-                            self.sar_participation[bin+1].append(member)
-                        self.sar_participation[bin].remove(member)
-                        break
-            main_acct = random.choice(members)
-            return main_acct, members
-
-        elif bank_id == "":  # Choose members from all accounts
-            members = [] # initiate list of participating accounts in alert
-            for m in range(num): # for each account in the alert
-                bin = 0
-                while random.random() > stats.logser.cdf(bin+1, self.default_prob_sar_participate):
-                    if bin+1 not in self.sar_participation: # if there are no accounts in the next bin, remain in the current
-                        break
-                    elif all([candidate in members for candidate in self.sar_participation[bin+1]]): # if all accounts in the next bin are already participating, remain in the current
-                        break
-                    else:
-                        bin += 1 # move to the next bin
-                
-                candidate = None 
-                while candidate is None:
-                    available_set = set(self.sar_participation[bin]) - set(members) # get the set of accounts that are in the current bin and not already participating
-                    if available_set == set() and (bin+1) in self.sar_participation: # if there are no accounts in the current bin and there are accounts in the next bin
-                        bin += 1
-                    elif available_set == set() and (bin+1) not in self.sar_participation:
-                        bin = max(bin-1, 0) # if there are no accounts in the current bin and no accounts in next bin, move to the previous bin
-                    else:
-                        candidate = random.choice(list(available_set)) # choose a random account from the available set
-                members.append(candidate)
-                
-            for member in members:
-                bins = list(self.sar_participation.keys())
-                for bin in bins:
-                    if member in self.sar_participation[bin]:
-                        if bin+1 not in self.sar_participation:
-                            self.sar_participation[bin+1] = [member]
-                        else:
-                            self.sar_participation[bin+1].append(member)
-                        self.sar_participation[bin].remove(member)
-                        break
-            main_acct = random.choice(members)
-            
-            return main_acct, members
-
+        if bank_id in self.bank_to_accts:
+            # Choose members from the specified bank
+            available_accts = list(self.bank_to_accts[bank_id])
+        elif bank_id == "":
+            # Choose members from all accounts
+            available_accts = list(self.g.nodes())
         else:
             raise KeyError("No such bank ID: %s" % bank_id)
+
+        members = []
+        for _ in range(num):
+            # Get candidates not already selected for this typology
+            candidates = [a for a in available_accts if a not in members]
+            if not candidates:
+                break  # No more available accounts
+
+            # Select using ML selector (applies decay automatically)
+            if self.ml_selector is not None:
+                if bank_id:
+                    candidate = self.ml_selector.weighted_choice_bank(candidates, bank_id)
+                else:
+                    candidate = self.ml_selector.weighted_choice(candidates)
+            else:
+                candidate = random.choice(candidates)
+
+            members.append(candidate)
+
+        # Select main account from members (highest weight among selected)
+        if self.ml_selector is not None:
+            main_acct = self.ml_selector.weighted_choice(members)
+        else:
+            main_acct = random.choice(members)
+
+        return main_acct, members
 
         
     def load_account_list(self):
@@ -450,14 +412,7 @@ class TransactionGenerator:
         header: uuid,seq,first_name,last_name,street_addr,city,state,zip,gender,phone_number,birth_date,ssn
         :param acct_file: Raw account list file path
         """
-        if self.default_min_balance is None:
-            raise KeyError("Option 'default_min_balance' is required to load raw account list")
-        min_balance = self.default_min_balance
-
-        if self.default_max_balance is None:
-            raise KeyError("Option 'default_max_balance' is required to load raw account list")
-        max_balance = self.default_max_balance
-
+        # Balance will be set by demographics assignment
         start_day = get_positive_or_none(self.default_start_step)
         end_day = get_positive_or_none(self.default_end_step)
         start_range = get_positive_or_none(self.default_start_range)
@@ -518,8 +473,8 @@ class TransactionGenerator:
                         "city": city, "state": state, "zip": zip_code, "gender": gender,
                         "phone_number": phone_number, "birth_date": birth_date, "ssn": ssn, "lon": lon, "lat": lat}
 
-                init_balance = random.uniform(min_balance, max_balance)  # Generate the initial balance
-                self.add_account(aid, init_balance=init_balance, is_sar=False, **attr)
+                # Balance will be set by demographics assignment
+                self.add_account(aid, init_balance=0.0, is_sar=False, **attr)
                 count += 1
 
 
@@ -558,16 +513,13 @@ class TransactionGenerator:
                 if row[0].startswith("#"):
                     continue
                 num = int(row[header.index('count')])
-                min_balance = parse_float(row[header.index('min_balance')])
-                max_balance = parse_float(row[header.index('max_balance')])
                 bank_id = row[header.index('bank_id')]
                 if bank_id is None:
                     bank_id = self.default_bank_id
 
-                # Generate accounts with random initial balance
+                # Generate accounts (balance will be set by demographics assignment)
                 for i in range(num):
-                    init_balance = random.uniform(min_balance, max_balance)  # Generate amount TODO: use distribution instead
-                    self.add_account(acct_id, init_balance=init_balance, bank_id=bank_id, is_sar=False, normal_models=list())
+                    self.add_account(acct_id, init_balance=0.0, bank_id=bank_id, is_sar=False, normal_models=list())
                     acct_id += 1
 
         logger.info("Generated %d accounts." % self.num_accounts)
@@ -578,7 +530,7 @@ class TransactionGenerator:
         TODO: Add options to call scale-free generator functions directly instead of loading degree CSV files
         :return: Directed graph as the base transaction graph (not complete transaction graph)
         """
-        deg_file = os.path.join(self.input_dir, self.degree_file) # read in degree.csv
+        deg_file = os.path.join(self.output_dir, self.degree_file)  # degree.csv is in spatial output
         in_deg, out_deg = get_degrees(deg_file, self.num_accounts) # read out the in and out degree distributions
         G = directed_configuration_model(in_deg, out_deg, self.seed)
         G = nx.DiGraph(G)
@@ -610,8 +562,6 @@ class TransactionGenerator:
 
         self.bank_to_accts[attr['bank_id']].add(acct_id)
         self.acct_to_bank[acct_id] = attr['bank_id']
-        self.sar_participation[0].append(acct_id) 
-
 
     def remove_typology_candidate(self, acct):
         """Remove an account vertex from AML typology member candidates
@@ -688,7 +638,11 @@ class TransactionGenerator:
         """
         header = next(reader)
 
-        self.nominator = Nominator(self.g)
+        # Get participation decay from config (default 1.0 = no decay for backward compatibility)
+        normal_patterns_conf = self.conf.get('normal_patterns', {})
+        participation_decay = normal_patterns_conf.get('participation_decay', 1.0)
+
+        self.nominator = Nominator(self.g, participation_decay=participation_decay)
 
         for row in reader:
             count = int(row[header.index('count')])
@@ -891,6 +845,157 @@ class TransactionGenerator:
         self.nominator.post_update(node_id, type)
         return True
 
+    def assign_demographics(self):
+        """
+        Assign demographics-based KYC attributes (age, salary, balance) to accounts.
+        Uses demographic statistics to create realistic, correlated KYC.
+
+        Call after normal models are built, before ML selector preparation.
+        Balance is derived from: salary + structural position + noise.
+        """
+        demographics_config = self.conf.get('demographics', {})
+        csv_path = demographics_config.get('csv_path')
+
+        if not csv_path:
+            raise ValueError("demographics.csv_path is required in config")
+
+        # Resolve path relative to input directory if not absolute
+        if not os.path.isabs(csv_path):
+            csv_path = os.path.join(self.input_dir, csv_path)
+
+        logger.info(f"Assigning demographics-based KYC from {csv_path}...")
+
+        balance_params = demographics_config.get('balance_params', None)
+
+        assign_kyc_from_demographics(
+            graph=self.g,
+            demographics_csv=csv_path,
+            seed=self.seed,
+            balance_params=balance_params
+        )
+
+        logger.info("Demographics assignment complete")
+
+    def prepare_money_laundering_selector(self):
+        """
+        Initialize and prepare the money laundering account selector.
+        This should be called after the baseline graph and normal models are built,
+        but before alert patterns are injected.
+
+        The selector biases alert member selection based on:
+        - Graph structure (degree, betweenness, pagerank)
+        - KYC attributes (balance, salary, age)
+        - Locality propagation via Personalized PageRank
+        """
+        logger.info("Preparing money laundering account selector...")
+        self.ml_selector = MoneyLaunderingAccountSelector(
+            graph=self.g,
+            config=self.conf,
+            acct_to_bank=self.acct_to_bank,
+            seed=self.seed
+        )
+        self.ml_selector.prepare()
+        logger.info("ML account selector ready")
+
+    def plot_ml_selection_analysis(self, verbose: bool = False):
+        """
+        Generate plots analyzing ML account selection vs structural/KYC components.
+
+        Should be called after load_alert_patterns() so SAR flags are set on accounts.
+
+        Args:
+            verbose: If True, generate plots. If False, skip plotting.
+        """
+        if not verbose:
+            return
+
+        if self.ml_selector is None:
+            logger.info("ML selector not configured, skipping selection analysis plots")
+            return
+
+        # Output to spatial output directory (alongside accounts.csv, transactions.csv, etc.)
+        self.ml_selector.plot_ml_selection_analysis(self.output_dir)
+
+    def save_baseline_checkpoint(self, checkpoint_path: str = None):
+        """
+        Save the baseline graph state after demographics assignment.
+
+        This checkpoint captures the state before alert pattern injection,
+        allowing the tuner to re-inject alerts with different configurations
+        without regenerating the entire graph.
+
+        The checkpoint includes:
+        - Transaction graph (nodes, edges, attributes)
+        - Bank mappings
+        - Normal models
+        - Hub accounts
+        - Edge/alert counters
+
+        Args:
+            checkpoint_path: Path to save checkpoint. If None, saves to
+                            {output_dir}/baseline_checkpoint.pkl
+        """
+        if checkpoint_path is None:
+            checkpoint_path = os.path.join(self.output_dir, 'baseline_checkpoint.pkl')
+
+        checkpoint = {
+            'graph': self.g,
+            'bank_to_accts': dict(self.bank_to_accts),  # Convert defaultdict
+            'acct_to_bank': self.acct_to_bank.copy(),
+            'normal_models': self.normal_models,
+            'normal_model_id': self.normal_model_id,
+            'hubs': self.hubs.copy(),
+            'edge_id': self.edge_id,
+            'alert_id': self.alert_id,
+            'num_accounts': self.num_accounts,
+            'attr_names': self.attr_names.copy(),
+        }
+
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+        with open(checkpoint_path, 'wb') as f:
+            pickle.dump(checkpoint, f)
+
+        logger.info(f"Saved baseline checkpoint to {checkpoint_path}")
+        return checkpoint_path
+
+    def load_baseline_checkpoint(self, checkpoint_path: str = None):
+        """
+        Load a baseline graph state from checkpoint.
+
+        Restores the graph to the state after demographics assignment,
+        before alert pattern injection. This allows re-injecting alerts
+        with different ML selector configurations.
+
+        Args:
+            checkpoint_path: Path to checkpoint file. If None, loads from
+                            {output_dir}/baseline_checkpoint.pkl
+        """
+        if checkpoint_path is None:
+            checkpoint_path = os.path.join(self.output_dir, 'baseline_checkpoint.pkl')
+
+        with open(checkpoint_path, 'rb') as f:
+            checkpoint = pickle.load(f)
+
+        # Restore graph state
+        self.g = checkpoint['graph'].copy()  # Deep copy to avoid modifying original
+        self.bank_to_accts = defaultdict(set, checkpoint['bank_to_accts'])
+        self.acct_to_bank = checkpoint['acct_to_bank'].copy()
+        self.normal_models = checkpoint['normal_models']
+        self.normal_model_id = checkpoint['normal_model_id']
+        self.hubs = checkpoint['hubs'].copy()
+        self.edge_id = checkpoint['edge_id']
+        self.alert_id = checkpoint['alert_id']
+        self.num_accounts = checkpoint['num_accounts']
+        self.attr_names = checkpoint['attr_names'].copy()
+
+        # Reset alert groups (will be repopulated by load_alert_patterns)
+        self.alert_groups = dict()
+
+        # Reset ML selector (will be re-prepared with new config)
+        self.ml_selector = None
+
+        logger.info(f"Loaded baseline checkpoint from {checkpoint_path}")
+
     def load_alert_patterns(self):
         """Load an AML typology parameter file
         :return:
@@ -993,7 +1098,13 @@ class TransactionGenerator:
             :return: main account ID and bank ID
             """
             self.check_hub_exists() # Check if there is a hub account (an account with large number of transactions)
-            _main_acct = random.sample(self.hubs, 1)[0] # Choose a hub account randomly
+
+            # Use weighted selection from ML selector
+            if self.ml_selector is not None:
+                _main_acct = self.ml_selector.weighted_choice(list(self.hubs))
+            else:
+                _main_acct = random.sample(self.hubs, 1)[0] # Choose a hub account randomly
+
             _main_bank_id = self.acct_to_bank[_main_acct] # Get bank ID of the hub account
             self.remove_typology_candidate(_main_acct)
             add_node(_main_acct, _main_bank_id)
@@ -1426,24 +1537,42 @@ class TransactionGenerator:
         self.alert_groups[self.alert_id] = sub_g
         self.alert_id += 1
 
+    def propagate_sar_flags(self):
+        """Propagate SAR flags from alert subgraphs to the main transaction graph.
+
+        This should be called after all alert patterns are loaded to ensure
+        accounts in SAR patterns are marked as SAR in the main graph.
+        """
+        sar_count = 0
+        for alert_id, sub_g in self.alert_groups.items():
+            # Only propagate if this is a SAR pattern (not false alert)
+            if sub_g.graph.get(IS_SAR_KEY, False):
+                for node in sub_g.nodes():
+                    if not self.g.nodes[node].get(IS_SAR_KEY, False):
+                        self.g.nodes[node][IS_SAR_KEY] = True
+                        sar_count += 1
+        logger.info(f"Propagated SAR flags to {sar_count} accounts from {len(self.alert_groups)} alert patterns")
 
     def write_account_list(self):
         """Write account list to a CSV file.
-        """        
+        """
         os.makedirs(self.output_dir, exist_ok=True)
         acct_file = os.path.join(self.output_dir, self.out_account_file)
         with open(acct_file, "w") as wf:
             writer = csv.writer(wf)
-            base_attrs = ["ACCOUNT_ID", "CUSTOMER_ID", "INIT_BALANCE", "IS_SAR", "BANK_ID"] # column names
+            base_attrs = ["ACCOUNT_ID", "CUSTOMER_ID", "INIT_BALANCE", "SALARY", "AGE", "CITY", "IS_SAR", "BANK_ID"]
             writer.writerow(base_attrs + self.attr_names) # add user-defined attributes
             for n in self.g.nodes(data=True): # loop over all nodes with access to their attributes
                 aid = n[0]  # Account ID
                 cid = "C_" + str(aid)  # Customer ID bounded to this account
                 prop = n[1]  # Account attributes
                 balance = "{0:.2f}".format(prop["init_balance"])  # Initial balance
+                salary = "{0:.2f}".format(prop["salary"])  # Monthly salary from demographics
+                age = prop["age"]  # Age from demographics
+                city = prop.get("city", "")  # City from demographics (may not exist for non-aggregated)
                 is_sar = "true" if prop[IS_SAR_KEY] else "false"  # Whether this account is involved in SAR
                 bank_id = prop["bank_id"]  # Bank ID
-                values = [aid, cid, balance, is_sar, bank_id]
+                values = [aid, cid, balance, salary, age, city, is_sar, bank_id]
                 for attr_name in self.attr_names:
                     values.append(prop[attr_name])
                 writer.writerow(values)
@@ -1563,18 +1692,32 @@ def generate_transaction_graph_from_config(conf, sim_name=None):
     txg.load_normal_models()  # Load a parameter CSV file for Normal Models
     txg.build_normal_models()  # Build normal models from the base transaction types
     txg.set_main_acct_candidates()  # Identify accounts with large amounts of in and out edges
+    txg.assign_demographics()  # Assign age/salary/balance from demographics
+    txg.prepare_money_laundering_selector()  # Prepare ML account selector
     txg.load_alert_patterns()  # Load alert patterns CSV file and create AML typology subgraphs
+    txg.propagate_sar_flags()  # Propagate SAR flags to main graph
+    txg.plot_ml_selection_analysis()  # Plot ML selection analysis
     txg.mark_active_edges()  # mark all edges in the normal models as active
     txg.write_account_list()  # Export accounts to a CSV file
     txg.write_transaction_list()  # Export transactions to a CSV file
     txg.write_alert_account_list()  # Export alert accounts to a CSV file
     txg.write_normal_models()
 
-def generate_transaction_graph(conf_file):
-    """Generate transaction graph from config file path (for CLI usage)."""
+def generate_transaction_graph(conf_file, verbose=None):
+    """Generate transaction graph from config file path (for CLI usage).
+
+    Args:
+        conf_file: Path to configuration YAML file
+        verbose: If True, generate diagnostic plots. If None, read from config.
+    """
     with open(conf_file, 'r') as f:
         conf = yaml.safe_load(f)
         sim_name = conf['general']['simulation_name']
+
+    # Read verbose from config if not explicitly provided
+    if verbose is None:
+        verbose = conf.get('general', {}).get('verbose', False)
+
     txg = TransactionGenerator(conf, sim_name)
     txg.set_num_accounts()  # Read out the number of accounts to be created
     txg.generate_normal_transactions()  # Load a parameter CSV file for the base transaction types
@@ -1582,12 +1725,118 @@ def generate_transaction_graph(conf_file):
     txg.load_normal_models()  # Load a parameter CSV file for Normal Models
     txg.build_normal_models()  # Build normal models from the base transaction types
     txg.set_main_acct_candidates()  # Identify accounts with large amounts of in and out edges
+    txg.assign_demographics()  # Assign age/salary/balance from demographics
+    txg.prepare_money_laundering_selector()  # Prepare ML account selector
     txg.load_alert_patterns()  # Load alert patterns CSV file and create AML typology subgraphs
+    txg.propagate_sar_flags()  # Propagate SAR flags to main graph
+    txg.plot_ml_selection_analysis(verbose=verbose)  # Plot ML selection analysis (if verbose)
     txg.mark_active_edges()  # mark all edges in the normal models as active
     txg.write_account_list()  # Export accounts to a CSV file
     txg.write_transaction_list()  # Export transactions to a CSV file
     txg.write_alert_account_list()  # Export alert accounts to a CSV file
     txg.write_normal_models()
+
+
+def generate_baseline(conf, sim_name=None, checkpoint_path=None):
+    """
+    Generate baseline transaction graph (Phase 1 for Bayesian optimization).
+
+    Creates the transaction graph up to demographics assignment and saves a checkpoint.
+    This baseline can then be used for multiple alert injection trials with different
+    ML selector configurations.
+
+    Steps performed:
+    1. Generate normal transactions (graph topology)
+    2. Load account list
+    3. Load and build normal models
+    4. Set main account candidates
+    5. Assign demographics (KYC attributes)
+    6. Save checkpoint
+
+    Args:
+        conf: Configuration dictionary with absolute paths
+        sim_name: Optional simulation name override
+        checkpoint_path: Path to save checkpoint. If None, saves to
+                        {output_dir}/baseline_checkpoint.pkl
+
+    Returns:
+        str: Path to saved checkpoint file
+    """
+    if sim_name is None:
+        sim_name = conf['general']['simulation_name']
+
+    logger.info(f"Generating baseline for {sim_name} (Phase 1)...")
+
+    txg = TransactionGenerator(conf, sim_name)
+    txg.set_num_accounts()
+    txg.generate_normal_transactions()
+    txg.load_account_list()
+    txg.load_normal_models()
+    txg.build_normal_models()
+    txg.set_main_acct_candidates()
+    txg.assign_demographics()
+
+    # Save checkpoint for later alert injection
+    saved_path = txg.save_baseline_checkpoint(checkpoint_path)
+
+    logger.info(f"Baseline generation complete. Checkpoint saved to {saved_path}")
+    return saved_path
+
+
+def inject_alerts_from_baseline(conf, checkpoint_path=None, sim_name=None):
+    """
+    Inject alert patterns from a baseline checkpoint (Phase 2 for Bayesian optimization).
+
+    Loads a previously saved baseline and injects alert patterns using the ML selector
+    configuration from the provided config. This allows testing different ML selection
+    parameters (structure weights, KYC weights, locality decay) without regenerating
+    the entire graph.
+
+    Steps performed:
+    1. Load baseline checkpoint
+    2. Prepare ML selector with new config weights
+    3. Load and inject alert patterns
+    4. Write output files
+
+    Args:
+        conf: Configuration dictionary with absolute paths. The ml_account_selection
+              section determines how accounts are selected for money laundering patterns.
+        checkpoint_path: Path to baseline checkpoint. If None, loads from
+                        {output_dir}/baseline_checkpoint.pkl
+        sim_name: Optional simulation name override
+
+    Returns:
+        TransactionGenerator: The generator instance with injected alerts
+    """
+    if sim_name is None:
+        sim_name = conf['general']['simulation_name']
+
+    logger.info(f"Injecting alerts from baseline for {sim_name} (Phase 2)...")
+
+    txg = TransactionGenerator(conf, sim_name)
+
+    # Load baseline state
+    txg.load_baseline_checkpoint(checkpoint_path)
+
+    # Prepare ML selector with (potentially different) config weights
+    txg.prepare_money_laundering_selector()
+
+    # Inject alert patterns using the new ML selector
+    txg.load_alert_patterns()
+    txg.propagate_sar_flags()  # Propagate SAR flags to main graph
+
+    # Generate analysis plots
+    txg.plot_ml_selection_analysis()
+
+    # Mark active edges and write outputs
+    txg.mark_active_edges()
+    txg.write_account_list()
+    txg.write_transaction_list()
+    txg.write_alert_account_list()
+    txg.write_normal_models()
+
+    logger.info("Alert injection complete")
+    return txg
 
 
 def main():
@@ -1609,19 +1858,25 @@ def main():
     with open(_conf_file, "r") as rf:
         conf = yaml.safe_load(rf)
 
+    # Read verbose from config
+    verbose = conf.get('general', {}).get('verbose', False)
+
     txg = TransactionGenerator(conf, _sim_name)
-    txg.set_num_accounts() # Read out the number of accounts to be created
+    txg.set_num_accounts()  # Read out the number of accounts to be created
     txg.generate_normal_transactions()  # Load a parameter CSV file for the base transaction types
     txg.load_account_list()  # Load account list CSV file and write accounts to nodes in network
     if degree_threshold > 0:
         logger.info("Generated normal transaction network")
         txg.count_fan_in_out_patterns(degree_threshold)
-    txg.load_normal_models() # Load a parameter CSV file for Normal Models
-    #cProfile.run('txg.build_normal_models()')
-    txg.build_normal_models() # Build normal models from the base transaction types
-    txg.set_main_acct_candidates() # Identify accounts with large amounts of in and out edges
+    txg.load_normal_models()  # Load a parameter CSV file for Normal Models
+    txg.build_normal_models()  # Build normal models from the base transaction types
+    txg.set_main_acct_candidates()  # Identify accounts with large amounts of in and out edges
+    txg.assign_demographics()  # Assign age/salary/balance from demographics
+    txg.prepare_money_laundering_selector()  # Prepare ML account selector
     txg.load_alert_patterns()  # Load alert patterns CSV file and create AML typology subgraphs
-    txg.mark_active_edges() # mark all edges in the normal models as active
+    txg.propagate_sar_flags()  # Propagate SAR flags to main graph
+    txg.plot_ml_selection_analysis(verbose=verbose)  # Plot ML selection analysis (if verbose)
+    txg.mark_active_edges()  # mark all edges in the normal models as active
 
     if degree_threshold > 0:
         logger.info("Added alert transaction patterns")

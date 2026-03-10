@@ -1,6 +1,9 @@
 import pandas as pd
 import os
 from typing import Optional, Union, List
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def flip_labels(nodes:pd.DataFrame, labels:list=[0, 1], fracs:list=[0.01, 0.1], seed:int=42):
@@ -119,7 +122,7 @@ def apply_train_noise(preprocessed_dir: str, noise_fn, noise_kwargs: dict = None
     is_transductive = 'train_mask' in df_train.columns
 
     if is_transductive:
-        print("\nApplying noise to transductive training labels...")
+        logger.info("Applying noise to transductive training labels...")
 
         # Extract indices of nodes with training labels
         train_mask = df_train['train_mask'].copy()
@@ -146,11 +149,11 @@ def apply_train_noise(preprocessed_dir: str, noise_fn, noise_kwargs: dict = None
         # Report statistics
         n_unknown = (df_train[df_train['train_mask']]['is_sar'] == -1).sum()
         n_train = df_train['train_mask'].sum()
-        print(f"  Training labels: {n_train}")
-        print(f"  Unknown labels: {n_unknown} ({100*n_unknown/n_train:.1f}%)")
+        logger.info(f"  Training labels: {n_train}")
+        logger.info(f"  Unknown labels: {n_unknown} ({100*n_unknown/n_train:.1f}%)")
 
     else:
-        print("\nApplying noise to inductive training labels...")
+        logger.info("Applying noise to inductive training labels...")
 
         # Apply noise to training set only
         df_train_noisy = noise_fn(df_train, **noise_kwargs)
@@ -159,8 +162,8 @@ def apply_train_noise(preprocessed_dir: str, noise_fn, noise_kwargs: dict = None
         # Report statistics
         n_unknown = (df_train_noisy['is_sar'] == -1).sum()
         n_train = len(df_train_noisy)
-        print(f"  Training nodes: {n_train}")
-        print(f"  Unknown labels: {n_unknown} ({100*n_unknown/n_train:.1f}%)")
+        logger.info(f"  Training nodes: {n_train}")
+        logger.info(f"  Unknown labels: {n_unknown} ({100*n_unknown/n_train:.1f}%)")
 
-    print("  Validation and test labels preserved for evaluation")
-    print(f"  Updated: {train_nodes_file}")
+    logger.info("  Validation and test labels preserved for evaluation")
+    logger.info(f"  Updated: {train_nodes_file}")

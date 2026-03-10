@@ -1,6 +1,9 @@
 import optuna
-from src.utils import set_random_seed 
+from src.utils import set_random_seed
+from src.utils.logging import get_logger
 from typing import Any, Dict, List
+
+logger = get_logger(__name__)
 
 class HyperparamTuner():
     def __init__(self, study_name: str, obj_fn: Any, params: Dict, search_space: Dict, Client: Any, Model: Any, Server: Any = None, seed: int = 42, n_workers: int = None, storage: str = None, metrics: List[str] = ['average_precision'], verbose: bool = True):
@@ -67,22 +70,19 @@ if __name__ == '__main__':
     from pathlib import Path
     from src.ml import servers, clients, models
     from src.utils.config import load_training_config
+    from src.utils.logging import configure_logging
 
     mp.set_start_method('spawn', force=True)
 
-    EXPERIMENT = '3_banks_homo_easy'
-    SETTING = 'federated' # 'centralized', 'federated', 'isolated'
-    SERVER_TYPE = 'TorchServer'
-    CLIENT_TYPE = 'TorchGeometricClient' # 'TorchClient', 'TorchGeometricClient'
-    MODEL_TYPE = 'GCN' # 'LogisticRegressor', 'MLP', 'GCN'
+    EXPERIMENT = 'template_experiment'
+    SETTING = 'centralized'
+    MODEL_TYPE = 'GraphSAGE'
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, help='Path to models config file.', default=f'experiments/{EXPERIMENT}/config/models.yaml')
     parser.add_argument('--study_name', type=str, help='Name of study.', default='hp_study')
-    parser.add_argument('--setting', type=str, help='Name of ojective function. Can be "centralized", "federated" or "isolated".', default=SETTING)
-    parser.add_argument('--client_type', type=str, help='Client class.', default=CLIENT_TYPE)
+    parser.add_argument('--setting', type=str, help='Training setting: "centralized", "federated" or "isolated".', default=SETTING)
     parser.add_argument('--model_type', type=str, help='Model class.', default=MODEL_TYPE)
-    parser.add_argument('--server_type', type=str, help='Server class.', default=SERVER_TYPE)
     parser.add_argument('--seed', type=int, help='Seed.', default=42)
     parser.add_argument('--n_workers', type=int, help='Number of workers. Defaults to number of clients.', default=None)
     parser.add_argument('--n_trials', type=int, help='Number of trials.', default=2)
@@ -96,14 +96,18 @@ if __name__ == '__main__':
         experiment_name = config_path.parent.parent.name  # Extract experiment name from config path
         args.results_dir = f'experiments/{experiment_name}/results/{args.setting}/{args.model_type}'
 
+    # Configure logging with log file in results directory
+    os.makedirs(args.results_dir, exist_ok=True)
+    log_file = os.path.join(args.results_dir, 'tune_hyperparams.log')
+    configure_logging(verbose=True, log_file=log_file)
+
     t = time.time()
 
     # Load config with auto-discovery of paths and clients
     params = load_training_config(
         args.config,
         args.model_type,
-        setting=args.setting,
-        client_type=args.client_type
+        setting=args.setting
     )
     if args.device is not None:
         params['device'] = args.device
@@ -114,15 +118,15 @@ if __name__ == '__main__':
     search_space = config[args.model_type]['search_space']
     os.makedirs(args.results_dir, exist_ok=True)
     storage = 'sqlite:///' + os.path.join(args.results_dir, 'hp_study.db')
-    
+
     hyperparamtuner = HyperparamTuner(
         study_name = args.study_name,
         obj_fn = getattr(training, args.setting),
         params = params,
         search_space = search_space,
-        Client = getattr(clients, args.client_type),
+        Client = getattr(clients, params['client_type']),
         Model = getattr(models, args.model_type),
-        Server = getattr(servers, args.server_type),
+        Server = getattr(servers, params.get('server_type', 'TorchServer')),
         seed = args.seed,
         n_workers = args.n_workers,
         storage = storage
@@ -131,16 +135,16 @@ if __name__ == '__main__':
     
     t = time.time() - t
     
-    print('Done')
-    print(f'Exec time: {t:.2f}s')
+    logger.info('Done')
+    logger.info(f'Exec time: {t:.2f}s')
     best_trials_file = os.path.join(args.results_dir, 'best_trials.txt')
     with open(best_trials_file, 'w') as f:
         for trial in best_trials:
-            print(f'\ntrial: {trial.number}')
+            logger.info(f'trial: {trial.number}')
             f.write(f'\ntrial: {trial.number}\n')
-            print(f'values: {trial.values}')
+            logger.info(f'values: {trial.values}')
             f.write(f'values: {trial.values}\n')
             for param in trial.params:
                 f.write(f'{param}: {trial.params[param]}\n')
-                print(f'{param}: {trial.params[param]}')
-    print(f'Saved results to {best_trials_file}\n')
+                logger.info(f'{param}: {trial.params[param]}')
+    logger.info(f'Saved results to {best_trials_file}')

@@ -14,21 +14,22 @@ from .normal_models import (
     ForwardModel, MutualModel, PeriodicalModel
 )
 from src.utils.pattern_types import SAR_PATTERN_TYPES, NORMAL_PATTERN_TYPES
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class AMLSimulator:
     """Main simulator for anti-money laundering transaction generation"""
 
-    def __init__(self, config, verbose: bool = True):
+    def __init__(self, config):
         """
         Initialize simulator with configuration dict.
 
         Args:
             config: Configuration dictionary
-            verbose: If True, print progress messages
         """
         self.config = config
-        self.verbose = verbose
 
         # Extract configuration
         self.sim_name = self.config['general']['simulation_name']
@@ -41,7 +42,7 @@ class AMLSimulator:
         self.random = np.random.RandomState(self.random_seed)
 
         # Paths
-        self.temp_dir = self.config['temporal']['directory']
+        self.spatial_dir = self.config['spatial']['directory']
         self.output_dir = self.config['output']['directory']
 
         # Create output directory if it doesn't exist
@@ -62,10 +63,9 @@ class AMLSimulator:
         # Extract margin ratio for amount reduction in patterns
         self.margin_ratio = self.config['default'].get('margin_ratio', 0.1)
 
-        if self.verbose:
-            print(f"Initialized AMLSimulator: {self.sim_name}")
-            print(f"Random seed: {self.random_seed}")
-            print(f"Total steps: {self.total_steps}")
+        logger.info(f"Initialized AMLSimulator: {self.sim_name}")
+        logger.info(f"Random seed: {self.random_seed}")
+        logger.info(f"Total steps: {self.total_steps}")
 
     @staticmethod
     def linear_to_lognormal_params(mean_linear, std_linear):
@@ -96,9 +96,8 @@ class AMLSimulator:
 
     def load_accounts(self):
         """Load accounts from CSV file"""
-        account_file = os.path.join(self.temp_dir, self.config['temporal']['accounts'])
-        if self.verbose:
-            print(f"Loading accounts from: {account_file}")
+        account_file = os.path.join(self.spatial_dir, self.config['spatial']['accounts'])
+        logger.info(f"Loading accounts from: {account_file}")
 
         df = pd.read_csv(account_file)
 
@@ -113,7 +112,9 @@ class AMLSimulator:
                 is_sar=row['IS_SAR'],
                 bank_id=row['BANK_ID'],
                 random_state=self.random_seed + row['ACCOUNT_ID'],  # Unique seed per account
-                n_steps_balance_history=default_conf.get('n_steps_balance_history', 28)
+                n_steps_balance_history=default_conf.get('n_steps_balance_history', 28),
+                salary=row['SALARY'],  # Monthly salary from demographics
+                age=row['AGE']  # Age from demographics
             )
 
             # Set behavior parameters
@@ -141,14 +142,12 @@ class AMLSimulator:
 
             self.accounts[row['ACCOUNT_ID']] = account
 
-        if self.verbose:
-            print(f"Loaded {len(self.accounts)} accounts")
+        logger.info(f"Loaded {len(self.accounts)} accounts")
 
     def load_transactions(self):
         """Load transaction network from CSV file"""
-        tx_file = os.path.join(self.temp_dir, self.config['temporal']['transactions'])
-        if self.verbose:
-            print(f"Loading transactions from: {tx_file}")
+        tx_file = os.path.join(self.spatial_dir, self.config['spatial']['transactions'])
+        logger.info(f"Loading transactions from: {tx_file}")
 
         df = pd.read_csv(tx_file)
 
@@ -161,19 +160,16 @@ class AMLSimulator:
                 dst.add_originator(src)
                 src.tx_types[dst.account_id] = row['ttype']
 
-        if self.verbose:
-            print(f"Loaded {len(df)} transaction connections")
+        logger.info(f"Loaded {len(df)} transaction connections")
 
     def load_normal_models(self):
         """Load normal transaction models and create model objects"""
-        models_file = os.path.join(self.temp_dir, self.config['temporal']['normal_models'])
+        models_file = os.path.join(self.spatial_dir, self.config['spatial']['normal_models'])
         if not os.path.exists(models_file):
-            if self.verbose:
-                print(f"Normal models file not found: {models_file}")
+            logger.info(f"Normal models file not found: {models_file}")
             return
 
-        if self.verbose:
-            print(f"Loading normal models from: {models_file}")
+        logger.info(f"Loading normal models from: {models_file}")
         df = pd.read_csv(models_file)
 
         # Get amount parameters from config
@@ -344,20 +340,17 @@ class AMLSimulator:
                 model.type_id = type_id  # Add type_id attribute
                 self.normal_model_objects.append(model)
 
-        if self.verbose:
-            print(f"Loaded {len(df)} normal model entries")
-            print(f"Created {len(self.normal_model_objects)} normal model objects")
+        logger.info(f"Loaded {len(df)} normal model entries")
+        logger.info(f"Created {len(self.normal_model_objects)} normal model objects")
 
     def load_alert_members(self):
         """Load alert model assignments and create AlertPattern objects"""
-        alert_file = os.path.join(self.temp_dir, self.config['temporal']['alert_members'])
+        alert_file = os.path.join(self.spatial_dir, self.config['spatial']['alert_members'])
         if not os.path.exists(alert_file):
-            if self.verbose:
-                print(f"Alert models file not found: {alert_file}")
+            logger.info(f"Alert models file not found: {alert_file}")
             return
 
-        if self.verbose:
-            print(f"Loading alert models from: {alert_file}")
+        logger.info(f"Loading alert models from: {alert_file}")
         df = pd.read_csv(alert_file)
 
         # Get SAR amount parameters from config
@@ -464,9 +457,8 @@ class AMLSimulator:
                 )
                 self.alert_patterns.append(pattern)
 
-        if self.verbose:
-            print(f"Loaded {len(df)} alert memberships")
-            print(f"Created {len(self.alert_patterns)} alert patterns")
+        logger.info(f"Loaded {len(df)} alert memberships")
+        logger.info(f"Created {len(self.alert_patterns)} alert patterns")
 
     def execute_normal_transactions(self, step):
         """Execute normal transactions based on model patterns"""
@@ -510,11 +502,38 @@ class AMLSimulator:
             for tx in scheduled_txs:
                 from_account = tx['from']
                 to_account = tx['to']
-                amount = tx['amount']
                 tx_type = tx['type']
+
+                # Handle dependent transactions (scatter phase of gather-scatter)
+                # These have amount=None and reference incoming transactions
+                if tx.get('amount') is None and '_incoming_refs' in tx:
+                    # Compute amount based on actual successful incoming transactions
+                    incoming_refs = tx['_incoming_refs']
+                    proportion = tx['_proportion']
+                    margin_ratio = tx['_margin_ratio']
+
+                    # Sum the actual amounts from successful incoming transactions
+                    total_incoming = sum(
+                        ref.get('_actual_amount', 0)
+                        for ref in incoming_refs
+                        if ref.get('_success', False)
+                    )
+
+                    # Compute outgoing amount: total * (1 - margin) * proportion
+                    amount = total_incoming * (1 - margin_ratio) * proportion
+
+                    if amount <= 0:
+                        # No successful incoming, skip this outgoing transaction
+                        continue
+                else:
+                    amount = tx['amount']
 
                 # Attempt the transaction
                 success = from_account.make_transaction(to_account, amount, tx_type)
+
+                # Track success and actual amount for dependent transactions
+                tx['_success'] = success
+                tx['_actual_amount'] = amount if success else 0
 
                 if success:
                     transactions.append({
@@ -532,14 +551,12 @@ class AMLSimulator:
 
     def run(self):
         """Run the simulation"""
-        if self.verbose:
-            print(f"\nStarting AMLSim for {self.total_steps} steps...")
-            print("=" * 60)
+        logger.info(f"\nStarting AMLSim for {self.total_steps} steps...")
+        logger.info("=" * 60)
 
         # Get list of unique banks for bank switching behavior
         available_banks = list(set(account.bank_id for account in self.accounts.values()))
-        if self.verbose:
-            print(f"Available banks: {len(available_banks)}")
+        logger.info(f"Available banks: {len(available_banks)}")
 
         all_transactions = []
 
@@ -568,8 +585,8 @@ class AMLSimulator:
 
         # Run simulation steps
         for step in range(self.total_steps):
-            if self.verbose and step % 100 == 0:
-                print(f"Step {step}/{self.total_steps}")
+            if step % 100 == 0:
+                logger.info(f"Step {step}/{self.total_steps}")
 
             # Handle account behaviors (income/outcome)
             for account in self.accounts.values():
@@ -659,9 +676,8 @@ class AMLSimulator:
                     'modelType': tx['modelType']
                 })
 
-        if self.verbose:
-            print("=" * 60)
-            print(f"Simulation complete! Generated {len(all_transactions)} transactions")
+        logger.info("=" * 60)
+        logger.info(f"Simulation complete! Generated {len(all_transactions)} transactions")
 
         self.transactions = all_transactions
         return all_transactions
@@ -669,8 +685,7 @@ class AMLSimulator:
     def write_output(self):
         """Write transaction log to Parquet file with optimized dtypes"""
         output_file = os.path.join(self.output_dir, self.config['output']['transaction_log'])
-        if self.verbose:
-            print(f"Writing output to: {output_file}")
+        logger.info(f"Writing output to: {output_file}")
 
         df = pd.DataFrame(self.transactions)
 
@@ -702,6 +717,5 @@ class AMLSimulator:
         # Write as Parquet with snappy compression (good balance of speed and compression)
         df.to_parquet(output_file, engine='pyarrow', compression='snappy', index=False)
 
-        if self.verbose:
-            print(f"Wrote {len(self.transactions)} transactions to {output_file}")
+        logger.info(f"Wrote {len(self.transactions)} transactions to {output_file}")
         return output_file

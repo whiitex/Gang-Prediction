@@ -12,7 +12,7 @@ input:
   transaction_type: transactionType.csv
   is_aggregated_accounts: true
   directory: /Users/jostman/Projects/AMLGentex/experiments/template_experiment/config
-temporal:
+spatial:
   transactions: transactions.csv
   accounts: accounts.csv
   alert_members: alert_models.csv
@@ -56,47 +56,103 @@ default:
   std_duration_alert: 3
   burstiness_bias_normal: 0.0
   burstiness_bias_alert: 10.0
-optimisation_bounds:
-  mean_amount_sar:
-  - 600
-  - 900
-  std_amount_sar:
-  - 200
-  - 400
-  mean_outcome_sar:
-  - 300
-  - 600
-  std_outcome_sar:
-  - 100
-  - 200
-  prob_spend_cash:
-  - 0.1
-  - 0.5
-  mean_phone_change_frequency_sar:
-  - 1260
-  - 1460
-  std_phone_change_frequency_sar:
-  - 265
-  - 465
-  mean_bank_change_frequency_sar:
-  - 1260
-  - 1460
-  std_bank_change_frequency_sar:
-  - 265
-  - 465
-  prob_participate_in_multiple_sars:
-  - 0.0
-  - 0.5
-  mean_duration_alert:
-  - 10.0
-  - 30.0
-  std_duration_alert:
-  - 5.0
-  - 20.0
-  burstiness_bias_alert:
-  - -4.0
-  - 4.0
 scale-free:
-  gamma: 2.0
-  loc: 1.0
-  average_degree: 2.0
+  # Truncated discrete power law parameters: P(K=k) ∝ k^(-gamma), k ∈ {kmin, ..., kmax}
+  # Either provide gamma directly, or provide average_degree to solve for gamma automatically
+  kmin: 1              # Minimum degree (replaces legacy 'loc' parameter)
+  # kmax: null         # Maximum degree (defaults to floor(sqrt(n)) if not specified)
+  # gamma: 2.0         # Power law exponent (if not provided, solved from average_degree)
+  average_degree: 4.0  # Target mean degree (used to solve for gamma if gamma not provided)
+normal_patterns:
+  # Controls how main accounts are selected for normal transaction patterns.
+  # Participation decay prevents high-degree nodes from dominating pattern membership.
+  participation_decay: 0.5  # Factor applied after each selection (0.5 = halve weight each time)
+ml_selector:
+  # Money Laundering Account Selector Configuration
+  # Controls biased selection of accounts for AML typology injection
+  #
+  # How it works:
+  # 1. Sample n_target_labels "target regions" (e.g., 5 target cities)
+  # 2. Select n_seeds_per_target seeds within each target
+  # 3. Compute Personalized PageRank from each target's seeds
+  # 4. Combine into global locality field - nodes structurally close to
+  #    ANY target get higher weights (regardless of their own attributes)
+  #
+  # Mode-specific guidance:
+  # - Raw accounts (is_aggregated_accounts: false): use propagate_labels: [city]
+  # - Aggregated accounts (is_aggregated_accounts: true): use propagate_labels: [bank_id]
+  #   (city not available in aggregated mode unless synthesized)
+  #
+  n_target_labels: 5  # Number of target regions to sample per label type
+  n_seeds_per_target: 10  # Seeds to select within each target region
+  restart_alpha: 0.15  # Restart probability for PPR (0.1-0.3, higher = more seed-local)
+  seed_strategy: degree  # How to select seeds: 'random', 'degree', or 'betweenness'
+  propagate_labels:  # KYC attributes to propagate (creates global locality field per type)
+    - city  # Use 'bank_id' for aggregated accounts mode
+  structure_weights:  # Weights for structural graph features (all log + z-score normalized)
+    degree: 0.4  # Degree centrality
+    betweenness: 0.3  # Betweenness centrality (structural importance)
+    pagerank: 0.8  # PageRank centrality (global importance)
+  propagation_weights:  # Weights for propagated locality fields
+    city: 1.0  # Weight for city-based locality (or bank_id if using that)
+  kyc_weights:  # Weights for direct KYC features (z-score normalized, not propagated)
+    init_balance: 0.0  # Account balance (log + z-score)
+    salary: 0.0  # Monthly salary (log + z-score), requires demographics enabled
+    age: 0.0  # Age in years (z-score, no log), requires demographics enabled
+demographics:
+  # Demographics-based KYC Assignment (required)
+  # Assigns realistic age, salary, and balance based on demographic statistics.
+  # Balance is derived from: salary + structural position + noise
+  # Median balance is calibrated to balance_months * population_median_salary
+  #
+  # CSV Schema (required columns):
+  #   - population size: Number of people in this age group
+  #   - average year income (tkr): Mean yearly income in thousands of SEK
+  #   - median year income (tkr): Median yearly income in thousands of SEK
+  #
+  # Age format (one of):
+  #   Option 1 - Single-year: 'age' column (e.g., 16, 17, 18, ...)
+  #   Option 2 - Age bands: 'age_low' and 'age_high' columns (sampled uniformly within band)
+  #
+  csv_path: demographics.csv  # Path to demographics CSV (relative to config dir or absolute)
+  balance_params:
+    balance_months: 2.5  # Target median balance as months of median salary
+    alpha_salary: 0.3  # Salary elasticity (how much balance scales with individual salary)
+    alpha_struct: 0.2  # Structural effect (high-degree nodes have higher balances)
+    sigma: 0.5  # Noise std dev
+
+# =============================================================================
+# OPTIMIZATION BOUNDS (for data tuning)
+# =============================================================================
+# These bounds are used by the DataTuner for Bayesian optimization.
+# They define the search space for tuning data generation parameters.
+
+optimisation_bounds:
+  # Temporal simulation parameters (maps to 'default' section)
+  temporal:
+    mean_amount_sar: [600, 900]
+    std_amount_sar: [200, 400]
+    mean_outcome_sar: [450, 550]
+    std_outcome_sar: [50, 100]
+    prob_spend_cash: [0.0, 0.1]
+    mean_phone_change_frequency_sar: [1260, 1460]
+    std_phone_change_frequency_sar: [265, 465]
+    mean_bank_change_frequency_sar: [1260, 1460]
+    std_bank_change_frequency_sar: [265, 465]
+    prob_participate_in_multiple_sars: [0.0, 0.5]
+    mean_duration_alert: [30.0, 60.0]
+    std_duration_alert: [5.0, 20.0]
+    burstiness_bias_alert: [-4.0, 4.0]
+  # ML Selector parameters (controls biased account selection for AML patterns)
+  ml_selector:
+    structure_weights:
+      degree: [-0.1, 0.1]
+      betweenness: [-0.1, 0.1]
+      pagerank: [-0.1, 0.1]
+    kyc_weights:
+      init_balance: [-0.2, 0.2]  # Negative = prefer low-balance accounts
+      salary: [-0.1, 0.1]
+      age: [-0.1, 0.1]
+    propagation_weights:
+      city: [0.0, 0.2]  # Controls geographic/network clustering of SAR accounts
+    participation_decay: [0.1, 0.3]

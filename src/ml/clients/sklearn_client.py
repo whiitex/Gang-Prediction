@@ -13,37 +13,27 @@ from sklearn.preprocessing import MinMaxScaler
 
 
 class SklearnClient():
-    def __init__(self, id: str, seed: int, trainset: str, Model: Any, trainset_size: float = None, valset_size: float = None, testset_size: float  = None, valset: str = None, testset: str = None, **kwargs):
+    def __init__(self, id: str, seed: int, trainset: str, valset: str, testset: str, Model: Any, **kwargs):
         self.id = id
         self.seed = seed
         self.results = {}
-        
+
         set_random_seed(self.seed)
 
-        train_df = pd.read_parquet(trainset).drop(columns=['account', 'bank'])
-        # Drop mask columns if present (for transductive learning)
-        mask_cols = [col for col in train_df.columns if col.endswith('_mask')]
-        if mask_cols:
-            train_df = train_df.drop(columns=mask_cols)
+        # Load trainset to check for transductive mode
+        full_df = pd.read_parquet(trainset).drop(columns=['account', 'bank'])
 
-        n = len(train_df)
-        if valset is not None:
+        # Transductive mode: masks present - filter by masks
+        if 'train_mask' in full_df.columns:
+            train_df = full_df[full_df['train_mask']].drop(columns=['train_mask', 'val_mask', 'test_mask'])
+            val_df = full_df[full_df['val_mask']].drop(columns=['train_mask', 'val_mask', 'test_mask'])
+            test_df = full_df[full_df['test_mask']].drop(columns=['train_mask', 'val_mask', 'test_mask'])
+        else:
+            # Inductive mode: separate files
+            train_df = full_df
             val_df = pd.read_parquet(valset).drop(columns=['account', 'bank'])
-            if mask_cols:
-                val_df = val_df.drop(columns=mask_cols)
-        else:
-            val_df = train_df.sample(n = int(n * valset_size), random_state=seed)
-            train_df = train_df.drop(val_df.index)
-        if testset is not None:
             test_df = pd.read_parquet(testset).drop(columns=['account', 'bank'])
-            if mask_cols:
-                test_df = test_df.drop(columns=mask_cols)
-        else:
-            test_df = train_df.sample(n = int(n * testset_size), random_state=seed)
-            train_df = train_df.drop(test_df.index)
-        if trainset_size is not None:
-            train_df = train_df.sample(n = int(n * trainset_size), random_state=seed)
-            
+
         self.X_train = train_df.drop(columns=['is_sar']).to_numpy()
         self.y_train = train_df['is_sar'].to_numpy()
         scaler = MinMaxScaler()
@@ -54,7 +44,7 @@ class SklearnClient():
         self.X_test = test_df.drop(columns=['is_sar']).to_numpy()
         self.X_test = scaler.transform(self.X_test)
         self.y_test = test_df['is_sar'].to_numpy()
-        
+
         self.model = Model(**filter_args(Model, kwargs))
     
     def train(self):

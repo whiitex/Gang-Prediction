@@ -1,9 +1,13 @@
 from src.data_tuning.optimizer import Optimizer
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class DataTuner:
     def __init__(self, data_conf_file, config, generator, preprocessor, target,
                  constraint_type, constraint_value, utility_metric,
-                 model, bo_dir, seed, num_trials_model, verbose=False):
+                 model, bo_dir, seed, num_trials_model):
         """
         Data tuning wrapper.
 
@@ -20,7 +24,6 @@ class DataTuner:
             bo_dir: Directory for Bayesian optimization results
             seed: Random seed
             num_trials_model: Number of hyperparameter optimization trials per data trial
-            verbose: Whether to print detailed progress
 
         Examples:
             # Precision@K: Optimize data to achieve 80% precision in top 100 alerts
@@ -44,7 +47,6 @@ class DataTuner:
         self.bo_dir = bo_dir
         self.seed = seed
         self.num_trials_model = num_trials_model
-        self.verbose = verbose
 
     def __call__(self, n_trials):
 
@@ -60,16 +62,14 @@ class DataTuner:
             model=self.model,
             bo_dir=self.bo_dir,
             seed=self.seed,
-            num_trials_model=self.num_trials_model,
-            verbose=self.verbose
+            num_trials_model=self.num_trials_model
         )
         best_trials = self.optimizer.optimize(n_trials=n_trials)
 
-        if self.verbose:
-            for trial in best_trials:
-                print(f'\ntrial: {trial.number}')
-                print(f'values: {trial.values}')
-                for param in trial.params:
-                    print(f'{param}: {trial.params[param]}')
+        for trial in best_trials:
+            logger.info(f'\ntrial: {trial.number}')
+            logger.info(f'values: {trial.values}')
+            for param in trial.params:
+                logger.info(f'{param}: {trial.params[param]}')
 
         return best_trials

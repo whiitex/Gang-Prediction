@@ -179,7 +179,8 @@ class CoarseningAwareLoss(nn.Module):
         # 2. Pattern contrastive loss
         loss_pattern = self._compute_pattern_contrastive_loss(embeddings)
 
-        return loss_cls + self.coarse_weight * loss_pattern
+        return loss_cls + 0 * loss_pattern
+        # return loss_cls + self.coarse_weight * loss_pattern
 
 
 def apply_graph_coarsening(

@@ -124,11 +124,11 @@ def coarse_one_level(
             A = B
         else:
             B = torch.sparse.mm(G.C, B)
-            # d, V = torch.linalg.eigh(B.T @ G.L @ B)
+            d, V = torch.linalg.eigh(B.T @ G.L @ B)
             X_init = torch.randn(B.shape[1], K, device=G.L.device)
-            d, V = torch.lobpcg(
-                B.T @ G.L @ B, k=K, X=X_init, largest=False, niter=50, tol=1e-4
-            )
+            # d, V = torch.lobpcg(
+            #     B.T @ G.L @ B, k=K, X=X_init, largest=False, niter=50, tol=1e-4
+            # )
             # d = torch.ones(K, device=G.L.device)
             # V = torch.eye(K, device=G.L.device)
             mask = d < 1e-10

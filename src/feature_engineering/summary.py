@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 from typing import Dict, Any
 from datetime import datetime
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def summarize_dataset(preprocessed_data_dir: str, output_file: str = None, raw_data_file: str = None) -> Dict[str, Any]:
@@ -75,9 +78,9 @@ def summarize_dataset(preprocessed_data_dir: str, output_file: str = None, raw_d
     # Save Markdown report
     _write_markdown_report(summary, markdown_file)
 
-    print(f"\nDataset summary saved to:")
-    print(f"  JSON: {json_file}")
-    print(f"  Markdown: {markdown_file}")
+    logger.info(f"Dataset summary saved to:")
+    logger.info(f"  JSON: {json_file}")
+    logger.info(f"  Markdown: {markdown_file}")
 
     return summary
 

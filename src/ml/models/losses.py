@@ -38,5 +38,8 @@ class DAMLoss(torch.nn.Module):
     def forward(self, logits, targets):
         targets = targets.to(torch.long)  # Ensure labels are integer indices
         margins = self.margins.to(logits.device)
-        adjusted_logits = logits - margins[targets]
-        return F.cross_entropy(adjusted_logits, targets.to(torch.float) )
+        # Subtract margin only from the target class logit for each sample
+        adjusted_logits = logits.clone()
+        batch_indices = torch.arange(logits.size(0), device=logits.device)
+        adjusted_logits[batch_indices, targets] -= margins[targets]
+        return F.cross_entropy(adjusted_logits, targets)

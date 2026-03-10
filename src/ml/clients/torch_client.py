@@ -5,18 +5,21 @@ import torch_geometric.transforms
 from src.ml.models import losses
 from src.ml.metrics import average_precision_score
 from src.utils import dataloaders, decrease_lr, filter_args, graphdataset, set_random_seed, tensordatasets
+from src.utils.logging import get_logger
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_recall_curve, precision_score, recall_score, roc_curve, confusion_matrix
 from torch.utils.data import WeightedRandomSampler
 from tqdm import tqdm
 from typing import Any, Dict, List, Tuple
 from sklearn.preprocessing import MinMaxScaler
 
+logger = get_logger(__name__)
+
 class TorchClient():
     """
     PyTorch-specific client for training and evaluation. 
     Can run in isolation and federation.
     """
-    def __init__(self, id: str, seed: int, device: str, trainset: str, batch_size: int, Model: Any, optimizer: str, criterion: str, trainset_size: float = None, valset_size: float = None, testset_size: float  = None, valset: str = None, testset: str = None, **kwargs):
+    def __init__(self, id: str, seed: int, device: str, trainset: str, valset: str, testset: str, batch_size: int, Model: Any, optimizer: str, criterion: str, **kwargs):
         self.id = id
         self.seed = seed
         self.device = device
@@ -24,52 +27,19 @@ class TorchClient():
 
         set_random_seed(self.seed)
 
-        train_df = pd.read_parquet(trainset).drop(columns=['account', 'bank'])
-        # Drop mask columns if present (for transductive learning)
-        mask_cols = [col for col in train_df.columns if col.endswith('_mask')]
-        if mask_cols:
-            train_df = train_df.drop(columns=mask_cols)
+        # Load trainset to check for transductive mode
+        full_df = pd.read_parquet(trainset).drop(columns=['account', 'bank'])
 
-        n = len(train_df)
-        n_neg = len(train_df[train_df['is_sar'] == 0])
-        n_pos = len(train_df[train_df['is_sar'] == 1])
-
-        # Split into positive and negative classes
-        train_df_neg = train_df[train_df['is_sar'] == 0]
-        train_df_pos = train_df[train_df['is_sar'] == 1]
-
-        if valset is not None:
+        # Transductive mode: masks present - filter by masks
+        if 'train_mask' in full_df.columns:
+            train_df = full_df[full_df['train_mask']].drop(columns=['train_mask', 'val_mask', 'test_mask'])
+            val_df = full_df[full_df['val_mask']].drop(columns=['train_mask', 'val_mask', 'test_mask'])
+            test_df = full_df[full_df['test_mask']].drop(columns=['train_mask', 'val_mask', 'test_mask'])
+        else:
+            # Inductive mode: separate files
+            train_df = full_df
             val_df = pd.read_parquet(valset).drop(columns=['account', 'bank'])
-            if mask_cols:
-                val_df = val_df.drop(columns=mask_cols)
-        else:
-            n_val_neg = int(n_neg * valset_size)
-            n_val_pos = int(n_pos * valset_size)
-            val_df_neg = train_df_neg.sample(n=n_val_neg, random_state=seed)
-            val_df_pos = train_df_pos.sample(n=n_val_pos, random_state=seed)
-            val_df = pd.concat([val_df_neg, val_df_pos])
-            train_df = train_df.drop(val_df.index)
-            train_df_neg = train_df_neg.drop(val_df_neg.index)
-            train_df_pos = train_df_pos.drop(val_df_pos.index)
-        if testset is not None:
             test_df = pd.read_parquet(testset).drop(columns=['account', 'bank'])
-            if mask_cols:
-                test_df = test_df.drop(columns=mask_cols)
-        else:
-            n_test_neg = int(n_neg * testset_size)
-            n_test_pos = int(n_pos * testset_size)
-            test_df_neg = train_df_neg.sample(n=n_test_neg, random_state=seed)
-            test_df_pos = train_df_pos.sample(n=n_test_pos, random_state=seed)
-            test_df = pd.concat([test_df_neg, test_df_pos])
-            train_df = train_df.drop(test_df.index)
-            train_df_neg = train_df_neg.drop(test_df_neg.index)
-            train_df_pos = train_df_pos.drop(test_df_pos.index)
-        if trainset_size is not None:
-            n_train_neg = int(n_neg * trainset_size)
-            n_train_pos = int(n_pos * trainset_size)
-            train_df_neg = train_df_neg.sample(n=n_train_neg, random_state=seed)
-            train_df_pos = train_df_pos.sample(n=n_train_pos, random_state=seed)
-            train_df = pd.concat([train_df_neg, train_df_pos])
         
         # ensure datasets are shuffled
         # train_df = train_df.sample(frac=1, random_state=seed)
@@ -88,7 +58,7 @@ class TorchClient():
         # This must happen BEFORE creating the model
         actual_input_dim = self.trainset.tensors[0].shape[1]
         if 'input_dim' in kwargs and kwargs['input_dim'] != actual_input_dim:
-            print(f"Warning: Configured input_dim={kwargs['input_dim']} doesn't match actual data dimension={actual_input_dim}. Using actual dimension.")
+            logger.warning(f"Configured input_dim={kwargs['input_dim']} doesn't match actual data dimension={actual_input_dim}. Using actual dimension.")
         kwargs['input_dim'] = actual_input_dim
 
         self.model = Model(**filter_args(Model, kwargs)).to(self.device)

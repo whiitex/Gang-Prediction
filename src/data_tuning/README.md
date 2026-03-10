@@ -239,21 +239,45 @@ constrained_utility_metric(
 
 ## Optimization Search Space
 
-Defined in `data.yaml` under `optimisation_bounds`:
+Defined in `data.yaml` under `optimisation_bounds`. Parameters are organized into sections:
 
 ```yaml
 optimisation_bounds:
-  mean_amount_sar: [600, 900]
-  std_amount_sar: [200, 400]
-  mean_outcome_sar: [300, 600]
-  std_outcome_sar: [100, 200]
-  prob_spend_cash: [0.1, 0.5]
-  mean_phone_change_frequency_sar: [1260, 1460]
-  std_phone_change_frequency_sar: [265, 465]
-  mean_bank_change_frequency_sar: [1260, 1460]
-  std_bank_change_frequency_sar: [265, 465]
-  prob_participate_in_multiple_sars: [0.0, 0.5]
+  # Temporal simulation parameters (maps to 'default' section)
+  temporal:
+    mean_amount_sar: [600, 900]
+    std_amount_sar: [200, 400]
+    mean_outcome_sar: [300, 600]
+    std_outcome_sar: [100, 200]
+    prob_spend_cash: [0.1, 0.5]
+    mean_phone_change_frequency_sar: [1260, 1460]
+    std_phone_change_frequency_sar: [265, 465]
+    mean_bank_change_frequency_sar: [1260, 1460]
+    std_bank_change_frequency_sar: [265, 465]
+    prob_participate_in_multiple_sars: [0.0, 0.5]
+
+  # ML Selector parameters (controls biased account selection for AML patterns)
+  # These affect which accounts get selected for money laundering typologies
+  ml_selector:
+    structure_weights:
+      degree: [0.0, 1.0]       # Graph degree centrality
+      betweenness: [0.0, 1.0]  # Betweenness centrality
+      pagerank: [0.0, 1.0]     # PageRank centrality
+    kyc_weights:
+      init_balance: [0.0, 1.0] # Account balance
+      salary: [0.0, 1.0]       # Monthly salary
+      age: [0.0, 1.0]          # Age in years
+    participation_decay: [0.3, 0.9]  # Decay for multi-pattern participation
 ```
+
+## Two-Phase Generation
+
+The optimizer uses two-phase spatial generation for efficient parameter exploration:
+
+1. **Baseline (once)**: Generates the transaction graph up to demographics assignment
+2. **Alert Injection (per trial)**: Loads baseline and injects alerts with trial's ML selector weights
+
+This allows exploring different ML selector configurations without regenerating the entire graph each time.
 
 ## Notes
 

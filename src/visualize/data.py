@@ -4,6 +4,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 import networkx as nx
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 def edge_label_hist(df:pd.DataFrame, banks:list, file:str):
     df = df[df['bankOrig'] != 'source']
@@ -94,7 +97,7 @@ def balance_curves(df:pd.DataFrame, file:str, bank=None):
         csv[f'{acct}'] = y
     for acct in pos_accts:
         if acct == 9633 or acct == 68717 or acct == 32407:
-            print(acct)
+            logger.debug(f"Debug account: {acct}")
         in_txs = df[df['nameDest'] == acct][['step', 'newbalanceDest']].rename(columns={'newbalanceDest': 'balance'})
         out_txs = df[df['nameOrig'] == acct][['step', 'newbalanceOrig']].rename(columns={'newbalanceOrig': 'balance'})
         txs = pd.concat([in_txs, out_txs])
@@ -423,8 +426,8 @@ def homophily(df:pd.DataFrame, banks, file:str):
     #     h = sum1 / sum2 if sum2 > 0 else 1
     #     homophily_class += 1/(len(homophiliy_class_sum1)-1) * max(h - len(df_nodes[df_nodes['class']==i]) / n_nodes, 0)
     
-    print(h_neg,h_pos)
-    
+    logger.debug(f"Homophily: h_neg={h_neg}, h_pos={h_pos}")
+
     with open(file, 'w') as f:
         f.write('homophily_edge,homophiliy_node,homophily_class_neg,homophily_class_pos\n')
         f.write(f'{homophily_edge},{homophiliy_node},{h_neg},{h_pos}\n')

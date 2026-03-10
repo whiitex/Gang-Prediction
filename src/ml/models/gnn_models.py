@@ -1,3 +1,19 @@
+"""
+Graph Neural Network models for AML detection.
+
+FEDERATED LEARNING NOTE:
+    All GNN models (GCN, GAT, GraphSAGE) override get/set_parameters and get/set_gradients
+    to EXCLUDE layer normalization parameters from federation.
+
+    Rationale: Layer norms compute running statistics (mean, variance) that are specific
+    to each client's local data distribution. Averaging these across clients in federated
+    learning would corrupt the normalization, as different banks may have different
+    feature distributions. Each client maintains its own layer norm statistics.
+
+    This means:
+    - Convolutional weights and biases ARE shared/averaged across clients
+    - Layer norm parameters are LOCAL to each client
+"""
 import torch
 import torch_geometric.nn
 from src.ml.models.base import TorchBaseModel

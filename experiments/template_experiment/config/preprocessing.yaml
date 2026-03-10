@@ -6,19 +6,63 @@
 # - Raw data file: {experiment_root}/temporal/tx_log.parquet
 # - Preprocessed data directory: {experiment_root}/preprocessed
 
-# Paths auto-constructed based on experiment root (no need to specify)
+# =============================================================================
+# FEATURE ENGINEERING
+# =============================================================================
 
 # Time window aggregation for features
-num_windows: 4
-window_len: 25  # days
+num_windows: 1
+window_len: 100  # days
 
-# Train/val/test splits (inductive learning - can overlap)
-train_start_step: 0
-train_end_step: 100
-val_start_step: 0
-val_end_step: 100
-test_start_step: 0
-test_end_step: 100
+# Include edge features (aggregated transaction statistics per edge)
+# When false: only edge topology (src, dst) is returned
+# When true: edge features (sums, means, counts, etc. per window) are also computed
+include_edge_features: false
 
-# Include transaction graph edges in features
-include_edges: false
+# =============================================================================
+# LEARNING MODE: transductive or inductive
+# =============================================================================
+#
+# TRANSDUCTIVE: Same graph for all splits, labels are split into train/val/test
+#   - Set learning_mode: transductive
+#   - Specify single time window: time_start, time_end
+#   - Configure label splits: transductive_train_fraction, etc.
+#
+# INDUCTIVE: Different time windows for train/val/test
+#   - Set learning_mode: inductive
+#   - Specify separate windows: train_start_step, train_end_step, etc.
+
+learning_mode: transductive
+
+# =============================================================================
+# TRANSDUCTIVE SETTINGS (only used when learning_mode: transductive)
+# =============================================================================
+
+# Time window (same for all splits)
+time_start: 0
+time_end: 100
+
+# Label split fractions
+transductive_train_fraction: 0.6
+transductive_val_fraction: 0.2
+transductive_test_fraction: 0.2
+
+# Random seed for reproducible label splits
+seed: 42
+
+# Pattern-based splitting - keeps all nodes from the same SAR pattern together
+# Prevents data leakage where model sees part of a pattern in training
+# and is evaluated on other nodes from the same pattern
+split_by_pattern: true
+
+# =============================================================================
+# INDUCTIVE SETTINGS (only used when learning_mode: inductive)
+# =============================================================================
+# Uncomment and configure these if using inductive mode:
+#
+# train_start_step: 0
+# train_end_step: 50
+# val_start_step: 51
+# val_end_step: 75
+# test_start_step: 76
+# test_end_step: 100

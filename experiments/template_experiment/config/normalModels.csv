@@ -1,7 +1,4 @@
 count,type,min_accounts,max_accounts,bank_id
-1000,single,2,2,
-1000,fan_out,5,15,
-1000,fan_in,5,15,
-1000,forward,3,3,
-1000,mutual,2,2,
-1000,periodical,2,2,
+650,fan_out,5,15,
+650,fan_in,5,15,
+650,forward,5,5,

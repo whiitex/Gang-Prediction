@@ -1,6 +1,9 @@
 import multiprocessing as mp
 import numpy as np
 from typing import Any, Dict, List
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 def run_clients(clients: List[Any], params: List[Dict]):
     ids = []
@@ -35,6 +38,7 @@ if __name__ == '__main__':
     import argparse
     from src.ml import clients, models
     from src.utils.config import load_training_config, get_client_config
+    from src.utils.logging import configure_logging
     import os
     import pickle
     import time
@@ -42,16 +46,14 @@ if __name__ == '__main__':
 
     mp.set_start_method('spawn', force=True)
 
-    EXPERIMENT = '3_banks_homo_mid'
-    CLIENT_TYPE = 'TorchGeometricClient' # 'TorchClient', 'TorchGeometricClient'
-    MODEL_TYPE = 'GCN' # 'LogisticRegressor', 'MLP', 'GCN'
+    EXPERIMENT = 'template_experiment'
+    MODEL_TYPE = 'GraphSAGE'
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, help='Path to models config file.', default=f'experiments/{EXPERIMENT}/config/models.yaml')
     parser.add_argument('--results', type=str, help='Path to results file.', default=None)
     parser.add_argument('--seed', type=int, help='Seed.', default=42)
     parser.add_argument('--n_workers', type=int, help='Number of workers. Default is number of clients.', default=None)
-    parser.add_argument('--client_type', type=str, help='Client class.', default=CLIENT_TYPE)
     parser.add_argument('--model_type', type=str, help='Model class.', default=MODEL_TYPE)
     parser.add_argument('--device', type=str, help='Device to use (cpu, cuda:0, etc.)', default=None)
     args = parser.parse_args()
@@ -62,14 +64,19 @@ if __name__ == '__main__':
         experiment_name = config_path.parent.parent.name  # Extract experiment name from config path
         args.results = f'experiments/{experiment_name}/results/isolated/{args.model_type}/results.pkl'
 
+    # Configure logging with log file in results directory
+    results_dir = os.path.dirname(args.results)
+    os.makedirs(results_dir, exist_ok=True)
+    log_file = os.path.join(results_dir, 'train.log')
+    configure_logging(verbose=True, log_file=log_file)
+
     t = time.time()
 
     # Load config with auto-discovery of paths and clients
     kwargs = load_training_config(
         args.config,
         args.model_type,
-        setting='isolated',
-        client_type=args.client_type
+        setting='isolated'
     )
     if args.device is not None:
         kwargs['device'] = args.device
@@ -80,15 +87,14 @@ if __name__ == '__main__':
         for client_id in kwargs['clients'].keys():
             client_config = get_client_config(base_config, client_id)
             kwargs['clients'][client_id].update(client_config)
-    Client = getattr(clients, args.client_type)
+    Client = getattr(clients, kwargs['client_type'])
     Model = getattr(models, args.model_type)
     results = isolated(seed=args.seed, Client=Client, Model=Model, n_workers=None, **kwargs)
     
     t = time.time() - t
     
-    print('Done')
-    print(f'Exec time: {t:.2f}s')
-    os.makedirs(os.path.dirname(args.results), exist_ok=True)
+    logger.info('Done')
+    logger.info(f'Exec time: {t:.2f}s')
     with open(args.results, 'wb') as f:
         pickle.dump(results, f)
-    print(f'Saved results to {args.results}\n')
+    logger.info(f'Saved results to {args.results}')
