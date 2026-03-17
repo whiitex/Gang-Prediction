@@ -5,8 +5,7 @@ import sys
 import numpy as np
 from tqdm import tqdm
 
-from src.GangPrediction.experiment_utils import evaluate_at_level
-from src.ml.metrics.metrics import average_precision_score
+from src.GangPrediction.gang_aware_subspace import get_gang_aware_basis
 
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
 
@@ -14,8 +13,6 @@ sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
 import torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch_geometric.utils import to_networkx
-import networkx as nx
 
 # graph coarsening - Loukas 2020
 from src.GangPrediction.coarsening_utils import *
@@ -96,7 +93,6 @@ def train_GNN_coarsening_aware_loss(
     normal_patterns=None,
     alert_thresholds=0.5,
     normal_thresholds=0.5,
-    prob_threshold=0.3,
     # Train patterns for contrastive loss (separate from eval patterns)
     alert_train_patterns=None,
     normal_train_patterns=None,
@@ -106,11 +102,9 @@ def train_GNN_coarsening_aware_loss(
     max_epoch_interval=3,
     loss_window=5,
     loss_threshold=0.01,
+    coarse_loss_epochs_per_level=1,
     train=False,
     model=None,
-    # Pattern type dictionaries for per-type detection tracking
-    alert_types=None,
-    normal_types=None,
     **kwargs,
 ):
     """
@@ -119,6 +113,13 @@ def train_GNN_coarsening_aware_loss(
     Simple epoch schedule:
     - Start with initial_epochs (default 5) epochs per coarsening level
     - Gradually reduce to 1 epoch per 3 coarsening levels at the end
+    - Apply the coarsening-aware loss for the first
+      coarse_loss_epochs_per_level inner epochs at each level
+
+    When use_learned_B=True:
+    - B is computed from GNN embeddings (orthonormal basis via SVD)
+    - SupernodeEmbeddingLoss enforces nodes in the same pattern to have similar embeddings
+    - This allows learning the coarsening structure end-to-end
     """
     N = data.num_nodes
     nclass = len(np.unique(data.y.numpy()))
@@ -142,6 +143,9 @@ def train_GNN_coarsening_aware_loss(
             class_weights=class_weights,
             alert_patterns=alert_train_patterns,
             normal_patterns=normal_train_patterns,
+            use_supernode_loss=(
+                True if method == "learning_subspace" else False
+            ),  # Enable supernode loss when learning B
         )
 
         # train data
@@ -175,43 +179,38 @@ def train_GNN_coarsening_aware_loss(
     Gc.y_test = torch.zeros_like(Gc.soft_y)
     Gc.y_test[Gc.test_idx, :] = Gc.soft_y[Gc.test_idx, :]
 
-    x, ycrs, yfine, prec_l, prec_fine, ylosst, ylossv, valacc, num_nodes_coarse = (
-        [],
-        [],
-        [],
-        [],
-        [],
-        [],
-        [],
-        [],
-        [],
-    )
-    alert_rates = []
-    alert_rates_gt = []
-    normal_rates_gt = []
-    # Rate1 and Rate2 for detailed tracking
-    alert_rates_rate1 = []
-    alert_rates_rate2 = []
-    alert_gt_type_rates = []
-    normal_gt_type_rates = []
-    alert_rates_gt_rate1 = []
-    alert_rates_gt_rate2 = []
-    normal_rates_gt_rate1 = []
-    normal_rates_gt_rate2 = []
-    # Per-type detection rates
-    alert_model_type_rates = []
-
     # Initialize coarsening matrices and a layout for visualization/debugging.
     C = sparse_eye(N)
     C_plus = sparse_eye(N)
 
-    if B is None:
-        if method == "variation_embedding":
-            print("Calculating B with embedding variation...")
-            B = calc_B_embedding(Gc, K)
-        else:
-            print("Calculating B with embedding variation...")
-            B = calc_B(Gc, K)
+    # L_plus = calc_L_half(Gc)  # Precompute L_half for variation-based coarsening
+
+    # Compute basis for coarsening using only TRAIN patterns
+    if method == "edge_gangs":
+        Uk = get_gang_aware_basis(
+            data,
+            # alert_patterns=alert_patterns,  # Use only train patterns
+            # normal_patterns=normal_patterns,  # Use only train patterns
+            alert_patterns=alert_train_patterns,  # Use only train patterns
+            normal_patterns=normal_train_patterns,  # Use only train patterns
+            K=K,
+            alpha=kwargs["alpha"],
+            method=kwargs["compression_method"],
+        )
+        B = calc_B(data, Uk.shape[1], U=Uk)  # Precompute eigenvectors
+        # B = calc_B(G, K, U=Uk)  # Precompute eigenvectors
+        print(f"Gang-aware basis shape: {B.shape}")
+    elif method == "variation_embedding":
+        Uk = calc_B_embedding(data, K)
+        B = calc_B(data, K, U=Uk)
+    elif method == "variation_edges":
+        B = calc_B(data, K)
+        # B2 = calc_B(G, K)
+        # B = torch.concat([B1, B2], dim=1)
+    elif method == "learning_subspace":
+        # For learning_subspace, we will compute the basis dynamically during training
+        B = None
+    # else:
 
     Call, Gall = [np.eye(N)], [Gc]
 
@@ -223,10 +222,10 @@ def train_GNN_coarsening_aware_loss(
     epoch_interval = 1  # Train every level initially (increases to max_epoch_interval)
     loss_history = []  # Track training losses for convergence detection
     epochs_per_level_history = []  # Track for saving
-
+    results_history = []  # Track evaluation results per level
     for level in range(1, levels + 1):
         # Simple ratio schedule (original formula)
-        ratio = np.log(level) / 3000 + 0.0001
+        ratio = np.log(level) / 10000 + 0.0001
         if ratio > 0.0025:
             ratio = 0.0025
         # ratio = 1
@@ -240,12 +239,23 @@ def train_GNN_coarsening_aware_loss(
         embeddings = model.get_embeddings(Gc.x, Gc.edge_index, Gc.edge_weight)
         Gc.embeddings = F.normalize(embeddings, p=2, dim=1).detach()
 
+        # Update B from embeddings if using learned B
+        if method == "learning_subspace" and train:
+            with torch.no_grad():
+                G_embeddings = model.get_embeddings(
+                    data.x, data.edge_index, data.edge_weight
+                )
+                # Recompute orthonormal basis from current embeddings
+                V = calc_B_from_embeddings(G_embeddings, K=min(K, data.num_nodes))
+                # B = B @ C
+                B_C = torch.sparse.mm(C, V)  # Update B for the current coarsened graph
+
         # max_eps_in_level += max_epsilon / levels
         max_sigma = (max_epsilon + 1) / (epsilon_l + 1) - 1
 
         Gc, B, sigma_l, done_flag = coarse_one_level(
             Gc,
-            B,
+            B=B_C if method == "learning_subspace" and train else B,
             K=K,
             method=method,
             algorithm=algorithm,
@@ -256,6 +266,8 @@ def train_GNN_coarsening_aware_loss(
         )
         C = torch.sparse.mm(Gc.C, C)
         C_plus = torch.sparse.mm(C_plus, Gc.C_plus)
+
+        P = torch.sparse.mm(C_plus, C)
 
         Gall.append(Gc)
         Call.append(C)
@@ -271,6 +283,9 @@ def train_GNN_coarsening_aware_loss(
         if train:
             # Dynamic epoch scheduling: only train if at the right interval
             if level % epoch_interval == 0:
+                active_coarse_loss_epochs = max(
+                    0, min(current_epochs, coarse_loss_epochs_per_level)
+                )
                 for epoch in range(current_epochs):
                     # train the GNN on the coarsened graph
                     train_loss, train_acc = train_gnn_1_epoch(
@@ -279,9 +294,11 @@ def train_GNN_coarsening_aware_loss(
                         criterion,
                         Gc,
                         C_plus,
+                        P,
+                        Gc.L,
                         original_data.y,
                         original_data.train_idx,
-                        coarse_loss=epoch == 0,
+                        coarse_loss=epoch < active_coarse_loss_epochs,
                         class_weights=class_weights,
                     )
 
@@ -320,108 +337,29 @@ def train_GNN_coarsening_aware_loss(
         else:
             train_loss = 0.0  # No training, so loss is 0
 
-        # Evaluate the model on the coarsened graph
-        acc_test_c, precission_c, pred_test_c, logits = evaluate_model(
-            model, Gc, log_info=False
-        )
-
-        # Project logits back to original graph size using C_plus
-        logits_fine = C_plus @ logits
-        pred_fine = torch.argmax(F.softmax(logits_fine, dim=1), dim=1)
-
-        accuracy_fine = torch.sum(
-            pred_fine[original_data.test_idx] == original_data.y[original_data.test_idx]
-        ).item() / len(original_data.test_idx)
-
-        # Use positive class PROBABILITIES (not logits) for precision calculation
-        # AP requires scores in [0,1] range for proper thresholding
-        probs_fine = F.softmax(logits_fine, dim=1)
-        prob_fine_scores = (
-            probs_fine[:, 1].cpu().numpy()
-            if probs_fine.dim() > 1 and probs_fine.shape[1] == 2
-            else probs_fine.cpu().numpy()
-        )
-        # Correct argument order: y_true first, y_scores second
-        precission_fine = average_precision_score(
-            original_data.y[original_data.test_idx].cpu().numpy(),
-            prob_fine_scores[original_data.test_idx.cpu().numpy()],
-            recall_span=(0.6, 1.0),
-        )
-
-        results = evaluate_at_level(
+        # Evaluate the model on the coarsened graph and compute pattern metrics.
+        results = evaluate_model(
             model,
             Gc,
-            C,
-            data.y,
-            alert_patterns,
-            normal_patterns,
-            alert_types=alert_types,
-            normal_types=normal_types,
+            C=C,
+            C_plus=C_plus,
+            original_data=original_data,
+            alert_patterns=alert_patterns,
+            normal_patterns=normal_patterns,
             alert_thresholds=alert_thresholds,
             normal_thresholds=normal_thresholds,
-            prob_threshold=prob_threshold,
         )
+        results["epsilons"] = epsilons
+        results["epochs_per_level"] = epochs_per_level_history
+        results_history.append(results)
+        alert_rate = results["alert_metrics"].get("detection_rate", 0)
+        normal_rate = results["normal_metrics"].get("detection_rate", 0)
 
         bar.set_postfix_str(
             f"ep={current_epochs}, {epsilon_l:.6f}/{max_epsilon:0.3f}, ratio={ratio:.6f}, nodes: {Gc.num_nodes} | "
-            f"alert_rate: {results.get('alert_model_rate', 0):.4f}, normal_rate: {results.get('normal_gt_rate', 0):.4f} | "
-            f"prec: {precission_fine:.4f}, coarse: {acc_test_c:.4f}, fine: {accuracy_fine:.4f} | "
+            f"alert_rate: {alert_rate:.4f}, normal_rate: {normal_rate:.4f} | "
+            f"prec: {results.get('precision_fine', 0):.4f}, coarse: {results.get('accuracy_test', 0):.4f}, fine: {results.get('accuracy_fine', 0):.4f} | "
         )
         bar.update(1)
 
-        # Store data for plotting
-        x.append(level)
-        ycrs.append(acc_test_c)
-        yfine.append(accuracy_fine)
-        ylosst.append(train_loss if current_epochs > 0 else ylosst[-1] if ylosst else 0)
-        num_nodes_coarse.append(Gc.num_nodes)
-        prec_l.append(precission_c)
-        prec_fine.append(precission_fine)
-        alert_rates.append(results.get("alert_model_rate", 0))
-        alert_rates_gt.append(results.get("alert_gt_rate", 0))
-        normal_rates_gt.append(results.get("normal_gt_rate", 0))
-        # Store rate1 and rate2 for detailed analysis
-        alert_rates_rate1.append(results.get("alert_model_rate1", 0))
-        alert_rates_rate2.append(results.get("alert_model_rate2", 0))
-        alert_rates_gt_rate1.append(results.get("alert_gt_rate1", 0))
-        alert_rates_gt_rate2.append(results.get("alert_gt_rate2", 0))
-        normal_rates_gt_rate1.append(results.get("normal_gt_rate1", 0))
-        normal_rates_gt_rate2.append(results.get("normal_gt_rate2", 0))
-        # Store per-type detection rates
-        alert_gt_type_rates.append(results.get("alert_gt_type_rates", {}))
-        alert_model_type_rates.append(results.get("alert_model_type_rates", {}))
-        normal_gt_type_rates.append(results.get("normal_gt_type_rates", {}))
-
-    if train:
-        name = f"data_gnn_CoarseningAwareLoss_V2_th_{similarity_threshold*100:.0f}_ep_{max_epsilon}_dynamic_train.npy"
-    else:
-        name = f"data_gnn_CoarseningAwareLoss_V2_th_{similarity_threshold*100:.0f}_ep_{max_epsilon}_dynamic_inference.npy"
-    np.save(
-        f"{save_path}{name}",
-        {
-            "x": x,
-            "ycrs": ycrs,
-            "yfine": yfine,
-            "ylosst": ylosst,
-            "prec_l": prec_l,
-            "prec_fine": prec_fine,
-            "epsilons": epsilons,
-            "num_nodes_coarse": num_nodes_coarse,
-            "epochs_per_level": epochs_per_level_history,
-            "alert_rates": alert_rates,
-            "alert_rates_gt": alert_rates_gt,
-            "normal_rates_gt": normal_rates_gt,
-            "alert_rates_rate1": alert_rates_rate1,
-            "alert_rates_rate2": alert_rates_rate2,
-            "alert_rates_gt_rate1": alert_rates_gt_rate1,
-            "alert_rates_gt_rate2": alert_rates_gt_rate2,
-            "normal_rates_gt_rate1": normal_rates_gt_rate1,
-            "normal_rates_gt_rate2": normal_rates_gt_rate2,
-            # Per-type detection rates
-            "alert_gt_type_rates": alert_gt_type_rates,
-            "alert_model_type_rates": alert_model_type_rates,
-            "normal_gt_type_rates": normal_gt_type_rates,
-        },
-    )
-
-    return Gall, Call, model, C_plus
+    return Gall, Call, model, C_plus, results_history

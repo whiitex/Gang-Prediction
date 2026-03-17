@@ -119,13 +119,14 @@ def coarse_one_level(
 
     done_flag = False
 
-    if "variation" in method:
+    if "variation" in method or method == "learning_subspace":
         if level == 1:
             A = B
         else:
-            B = torch.sparse.mm(G.C, B)
+            if method != "learning_subspace":
+                B = torch.sparse.mm(G.C, B)
             d, V = torch.linalg.eigh(B.T @ G.L @ B)
-            X_init = torch.randn(B.shape[1], K, device=G.L.device)
+            # X_init = torch.randn(B.shape[1], K, device=G.L.device)
             # d, V = torch.lobpcg(
             #     B.T @ G.L @ B, k=K, X=X_init, largest=False, niter=50, tol=1e-4
             # )
@@ -134,15 +135,14 @@ def coarse_one_level(
             mask = d < 1e-10
             d[mask] = 1
             # dinvsqrt = d ** (0)
-            if method in ["variation_edges", "variation_embedding"]:
+            if method in ["variation_edges", "variation_embedding", "learning_subspace"]:
                 dinvsqrt = d ** (-0.5)
             elif method == "gang_edges":
                 dinvsqrt = d ** (+0.5)
             # dinvsqrt = d ** (-0.5)
             dinvsqrt[mask] = 0
             A = B @ V @ torch.diag(dinvsqrt) @ V.T
-
-        if method in ["variation_edges", "gang_edges", "variation_embedding"]:
+        if method in ["variation_edges", "gang_edges", "variation_embedding", "learning_subspace"]:
             coarsening_list, sigma_l, done_flag = contract_variation_edges(
                 G,
                 A=A,
@@ -170,7 +170,6 @@ def coarse_one_level(
                 similarity_threshold=similarity_threshold,
                 max_sigma=max_sigma,
             )
-
     else:
         weights = get_proximity_measure(G, method, K=K)
 
@@ -195,6 +194,18 @@ def coarse_one_level(
     Gc = construct_G(G, iC)
 
     return Gc, B, sigma_l, done_flag
+
+
+def calc_L_plus(Gc):
+    """Compute the square root of the Laplacian for variation-based coarsening."""
+    d, V = torch.linalg.eigh(Gc.L.to_dense())
+    # d, V = torch.lobpcg(Gc.L, k=Gc.num_nodes, X=torch.randn(Gc.num_nodes, Gc.num_nodes), largest=False, niter=200, tol=1e-4)
+    mask = d < 1e-10
+    d[mask] = 1
+    dinvsqrt = d ** (-0.5)
+    dinvsqrt[mask] = 0
+    L_plus = V @ torch.diag(dinvsqrt) @ V.T
+    return L_plus
 
 
 def calc_B(Gc, K, U=None):
@@ -656,6 +667,11 @@ def contract_variation_edges(
 
     # Vectorized structural cost: 0.25 * (deg_sum)^2 * ||diff||^4
     weights = 0.25 * (deg_sum**2) * (diff_norm_sq**2)
+
+    # Enforce same-label constraint: set weight to infinity for edges connecting different labels
+    if hasattr(G, "y") and G.y is not None:
+        different_labels = G.y[src] != G.y[tgt]
+        weights[different_labels] = float("inf")
 
     if algorithm == "optimal":
         # identify the minimum weight matching
@@ -1292,6 +1308,11 @@ def matching_greedy(
         # check if marked
         if any(marked[[i, j]]):
             continue
+
+        # Check same-label constraint: only allow coarsening if nodes have the same label
+        if hasattr(G, "y") and G.y is not None:
+            if G.y[i] != G.y[j]:
+                continue
 
         if X is not None:
             sim = similarity(X[[i, j]])
