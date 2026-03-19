@@ -757,6 +757,156 @@ def plot_pattern_type_comparison(
     return fig, ax
 
 
+def plot_pattern_type_comparison_initial_best_final(
+    data: Dict,
+    max_epsilon: float,
+    save_path: str,
+    pattern_type: str = "alert",
+    use_model: bool = False,
+    best_level_idx: Optional[int] = None,
+):
+    """Plot grouped bars per pattern type for Initial, Best, and Final levels."""
+    if pattern_type == "alert":
+        type_rates_key = (
+            "alert_model_type_rates" if use_model else "alert_gt_type_rates"
+        )
+        overall_rate_key = "alert_detection_rate"
+    else:
+        type_rates_key = "normal_gt_type_rates"
+        overall_rate_key = "normal_detection_rate"
+
+    level_type_rates = data.get(type_rates_key, [])
+    if not isinstance(level_type_rates, list) or len(level_type_rates) == 0:
+        print(f"No type detection data found for {pattern_type} patterns")
+        return None, None
+
+    n_levels = len(level_type_rates)
+
+    if best_level_idx is None:
+        overall_rates = data.get(overall_rate_key, [])
+        if isinstance(overall_rates, list) and len(overall_rates) >= n_levels:
+            best_idx = 0
+            best_val = -np.inf
+            for idx, val in enumerate(overall_rates[:n_levels]):
+                if val is None or np.isnan(val):
+                    continue
+                if val > best_val:
+                    best_val = val
+                    best_idx = idx
+            best_level_idx = best_idx
+        else:
+            # Fallback: choose level with highest mean per-type rate.
+            best_idx = 0
+            best_val = -np.inf
+            for idx, rates in enumerate(level_type_rates):
+                if not isinstance(rates, dict) or not rates:
+                    continue
+                vals = [
+                    m.get("rate", np.nan) for m in rates.values() if isinstance(m, dict)
+                ]
+                vals = [v for v in vals if v is not None and not np.isnan(v)]
+                if not vals:
+                    continue
+                mean_val = float(np.mean(vals))
+                if mean_val > best_val:
+                    best_val = mean_val
+                    best_idx = idx
+            best_level_idx = best_idx
+
+    best_level_idx = max(0, min(int(best_level_idx), n_levels - 1))
+
+    initial_rates = level_type_rates[0] if isinstance(level_type_rates[0], dict) else {}
+    best_rates = (
+        level_type_rates[best_level_idx]
+        if isinstance(level_type_rates[best_level_idx], dict)
+        else {}
+    )
+    final_rates = level_type_rates[-1] if isinstance(level_type_rates[-1], dict) else {}
+
+    all_pattern_types = sorted(
+        set(initial_rates.keys()) | set(best_rates.keys()) | set(final_rates.keys())
+    )
+    if not all_pattern_types:
+        print(f"No type detection data found for {pattern_type} patterns")
+        return None, None
+
+    fig, ax = plt.subplots(figsize=(13, 6))
+
+    x = np.arange(len(all_pattern_types))
+    width = 0.25
+
+    initial_vals = [
+        initial_rates.get(ptype, {}).get("rate", 0.0) for ptype in all_pattern_types
+    ]
+    best_vals = [
+        best_rates.get(ptype, {}).get("rate", 0.0) for ptype in all_pattern_types
+    ]
+    final_vals = [
+        final_rates.get(ptype, {}).get("rate", 0.0) for ptype in all_pattern_types
+    ]
+
+    bars_initial = ax.bar(
+        x - width,
+        initial_vals,
+        width,
+        label="Initial",
+        color="steelblue",
+        alpha=0.9,
+    )
+    bars_best = ax.bar(
+        x,
+        best_vals,
+        width,
+        label=f"Best (Level {best_level_idx})",
+        color="mediumseagreen",
+        alpha=0.9,
+    )
+    bars_final = ax.bar(
+        x + width,
+        final_vals,
+        width,
+        label="Final",
+        color="indianred",
+        alpha=0.9,
+    )
+
+    for bars in [bars_initial, bars_best, bars_final]:
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(
+                f"{height:.2f}",
+                xy=(bar.get_x() + bar.get_width() / 2, height),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+            )
+
+    ax.set_xlabel("Pattern Type")
+    ax.set_ylabel("Detection Rate")
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [ptype.replace("_", " ").title() for ptype in all_pattern_types],
+        rotation=45,
+        ha="right",
+    )
+    ax.set_ylim(0, 1.2)
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.legend()
+
+    source = "Model" if use_model else "GT"
+    ax.set_title(
+        f"{pattern_type.title()} Pattern Detection by Type: Initial vs Best vs Final ({source}-based, eps={max_epsilon:.1f})"
+    )
+
+    plt.tight_layout()
+    fig.savefig(save_path, bbox_inches="tight")
+    print(f"Saved initial-best-final pattern type comparison to {save_path}")
+
+    return fig, ax
+
+
 def plot_pattern_type_heatmap(
     data: Dict,
     max_epsilon: float,
@@ -1044,14 +1194,14 @@ def plot_pattern_type_metrics_combined(
         ax.set_ylabel(metric_label)
         ax.set_title(metric_label)
         ax.grid(True, alpha=0.3)
-        if metric_key in {
-            "rate",
-            "detection_rate_filtered",
-            "f1",
-            "recall",
-            "precision",
-        }:
-            ax.set_ylim(-0.05, 1.05)
+        # if metric_key in {
+        #     "rate",
+        #     "detection_rate_filtered",
+        #     "f1",
+        #     "recall",
+        #     "precision",
+        # }:
+        # ax.set_ylim(-0.05, 1.05)
         if plotted_any:
             ax.legend(fontsize=8)
 
@@ -1724,23 +1874,15 @@ def plot_all_results(
             pattern_type="alert",
             use_model=False,
         )
-        # Bar chart comparison at final level
-        plot_pattern_type_comparison(
+        # Grouped bar chart with initial, best, and final levels in one figure
+        plot_pattern_type_comparison_initial_best_final(
             data,
             max_epsilon,
-            str(save_dir / f"alert_type_comparison_final{name_prefix}.png"),
+            str(
+                save_dir / f"alert_type_comparison_initial_best_final{name_prefix}.png"
+            ),
             pattern_type="alert",
             use_model=False,
-            level_idx=-1,
-        )
-        # Bar chart comparison at initial level
-        plot_pattern_type_comparison(
-            data,
-            max_epsilon,
-            str(save_dir / f"alert_type_comparison_initial{name_prefix}.png"),
-            pattern_type="alert",
-            use_model=False,
-            level_idx=0,
         )
         # Heatmap of detection by type and level
         plot_pattern_type_heatmap(
@@ -1779,23 +1921,15 @@ def plot_all_results(
             pattern_type="normal",
             use_model=False,
         )
-        # Bar chart comparison at final level
-        plot_pattern_type_comparison(
+        # Grouped bar chart with initial, best, and final levels in one figure
+        plot_pattern_type_comparison_initial_best_final(
             data,
             max_epsilon,
-            str(save_dir / f"normal_type_comparison_final{name_prefix}.png"),
+            str(
+                save_dir / f"normal_type_comparison_initial_best_final{name_prefix}.png"
+            ),
             pattern_type="normal",
             use_model=False,
-            level_idx=-1,
-        )
-        # Bar chart comparison at initial level
-        plot_pattern_type_comparison(
-            data,
-            max_epsilon,
-            str(save_dir / f"normal_type_comparison_initial{name_prefix}.png"),
-            pattern_type="normal",
-            use_model=False,
-            level_idx=0,
         )
         # Heatmap of detection by type and level
         plot_pattern_type_heatmap(

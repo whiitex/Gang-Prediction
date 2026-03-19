@@ -62,7 +62,6 @@ class SupernodeEmbeddingLoss(nn.Module):
             Combined loss scalar
         """
         device = embeddings.device
-        N = embeddings.shape[0]
 
         # Combine all patterns (both alert and normal patterns define supernodes)
         all_patterns = []
@@ -83,48 +82,40 @@ class SupernodeEmbeddingLoss(nn.Module):
 
         # Collect all pattern centroids for negative sampling
         pattern_centroids = []
-        pattern_node_sets = []
-
+        sum_nodes = 0
         for pattern in all_patterns:
-            # Filter valid indices
-            valid_indices = [idx for idx in pattern.node_indices if idx < N]
-            if len(valid_indices) < 1:
-                continue
-
-            pattern_indices = torch.tensor(
-                valid_indices, dtype=torch.long, device=device
-            )
-            pattern_embeddings = embeddings[pattern_indices]
+            pattern_embeddings = embeddings[pattern.node_indices]
 
             # Compute centroid of the supernode
             centroid = pattern_embeddings.mean(dim=0, keepdim=True)
             pattern_centroids.append(centroid)
-            pattern_node_sets.append(set(valid_indices))
 
             # 1. Intra-supernode consistency loss
             # All nodes in the same supernode should have the same embedding
-            if len(valid_indices) >= 2:
+            if len(pattern.node_indices) >= 2:
                 # Variance within supernode (want to minimize)
                 # Using MSE from centroid
                 intra_distances = ((pattern_embeddings - centroid) ** 2).sum(dim=1)
-                intra_loss += intra_distances.mean()
+                intra_loss += intra_distances.sum()
 
             n_valid_patterns += 1
+            sum_nodes += pattern.num_nodes
 
-        if n_valid_patterns == 0:
-            return torch.tensor(0.0, device=device, requires_grad=True)
+        intra_loss = intra_loss / (sum_nodes + 1e-6)  # Average per node
 
         # 2. Negative sampling loss (prevent collapse)
         # Push apart centroids of different supernodes
         if len(pattern_centroids) >= 2:
             centroids = torch.cat(pattern_centroids, dim=0)  # [K, D]
-            normalized_centroids = F.normalize(
-                centroids, p=2, dim=1
-            )  # Normalize for cosine similarity
+            # normalized_centroids = F.normalize(
+            #     centroids, p=2, dim=1
+            # )  # Normalize for cosine similarity
 
             # Compute pairwise similarities between all centroids
             similarity_matrix = torch.mm(
-                normalized_centroids, normalized_centroids.T
+                centroids,
+                centroids.T,
+                # normalized_centroids, normalized_centroids.T
             )  # [K, K]
 
             # Create mask to exclude self-similarity
@@ -179,7 +170,7 @@ def l_orthonormalize(Z, L, eps=1e-6, remove_constant=True):
     if remove_constant:
         Z = Z - Z.mean(dim=0, keepdim=True)
 
-    G = Z.T @ L @ Z
+    G = Z.T @ torch.sparse.mm(L.T, L) @ Z
     G = G + eps * torch.eye(k, device=Z.device, dtype=Z.dtype)
 
     # G = R^T R
@@ -243,7 +234,7 @@ def calc_B_from_embeddings(embeddings: torch.Tensor, K: int = None) -> torch.Ten
 class CoarseningAwareLoss(nn.Module):
     def __init__(
         self,
-        coarse_weight: float = 1.0,
+        coarse_weight: float = 1,
         class_weights: torch.Tensor = None,
         alert_patterns: Dict[str, List[int]] = None,
         normal_patterns: Dict[str, List[int]] = None,
@@ -422,7 +413,7 @@ class CoarseningAwareLoss(nn.Module):
             return loss_cls
 
         # 2. Pattern contrastive loss
-        loss_pattern = self._compute_pattern_contrastive_loss(embeddings)
+        # loss_pattern = self._compute_pattern_contrastive_loss(embeddings)
 
         # 3. Supernode embedding loss (for learned B)
         loss_supernode = torch.tensor(0.0, device=embeddings.device)
@@ -442,7 +433,7 @@ class CoarseningAwareLoss(nn.Module):
 
         return (
             loss_cls
-            + 0 * loss_pattern
+            # + 0 * loss_pattern
             + self.coarse_weight * loss_supernode
             + 1 * epsillon_loss
         )

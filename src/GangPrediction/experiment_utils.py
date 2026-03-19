@@ -1,6 +1,5 @@
 """Utility functions for pattern loading, evaluation, and experiment setup."""
 
-from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -9,11 +8,11 @@ import pandas as pd
 import torch
 import torch_geometric.data
 import torch_geometric.transforms
-from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 from sklearn.preprocessing import MinMaxScaler
 
 from src.GangPrediction.pattern_models import Pattern, create_pattern
 from src.GangPrediction.utils.utils import graph_params
+
 
 def _capture_pattern_lineage(
     patterns: List[Pattern],
@@ -83,6 +82,7 @@ def get_node_to_supernode_mapping(C):
     C_dense = C.to_dense()
     return torch.argmax(C_dense, dim=0)
 
+
 def load_amlgentex_data(config_dir: Path):
     """
     Load and preprocess AMLGentex dataset.
@@ -118,18 +118,18 @@ def load_amlgentex_data(config_dir: Path):
     }
 
     # Get train/val/test indices
-    train_idx = torch.tensor(
-        [node_to_index[acc] for acc in nodes_df[nodes_df["train_mask"]]["account"]],
-        dtype=torch.long,
-    )
-    val_idx = torch.tensor(
-        [node_to_index[acc] for acc in nodes_df[nodes_df["val_mask"]]["account"]],
-        dtype=torch.long,
-    )
-    test_idx = torch.tensor(
-        [node_to_index[acc] for acc in nodes_df[nodes_df["test_mask"]]["account"]],
-        dtype=torch.long,
-    )
+    # train_idx = torch.tensor(
+    #     [node_to_index[acc] for acc in nodes_df[nodes_df["train_mask"]]["account"]],
+    #     dtype=torch.long,
+    # )
+    # val_idx = torch.tensor(
+    #     [node_to_index[acc] for acc in nodes_df[nodes_df["val_mask"]]["account"]],
+    #     dtype=torch.long,
+    # )
+    # test_idx = torch.tensor(
+    #     [node_to_index[acc] for acc in nodes_df[nodes_df["test_mask"]]["account"]],
+    #     dtype=torch.long,
+    # )
 
     # Prepare features and labels
     nodes_df = nodes_df.drop(columns=["bank"])
@@ -156,11 +156,11 @@ def load_amlgentex_data(config_dir: Path):
 
     # Create PyG Data object
     G = torch_geometric.data.Data(x=X_normalized, edge_index=edges_index, y=y)
-    G = torch_geometric.transforms.ToUndirected()(G)
+    # G = torch_geometric.transforms.ToUndirected()(G)
     G.edge_weight = torch.ones(G.edge_index.size(1))
-    G.train_idx = train_idx
-    G.val_idx = val_idx
-    G.test_idx = test_idx
+    # G.train_idx = train_idx
+    # G.val_idx = val_idx
+    # G.test_idx = test_idx
     G.W, G.L, G.dw = graph_params(G)
 
     return G, node_to_index

@@ -102,7 +102,8 @@ def sparse_eye(size):
 def graph_params(G: Data):
     """Compute adjacency, Laplacian, and degree for a PyG graph."""
     num_nodes = G.num_nodes
-    edge_index, edge_weight = remove_self_loops(G.edge_index, G.edge_weight)
+    # edge_index, edge_weight = remove_self_loops(G.edge_index, G.edge_weight)
+    edge_index, edge_weight = G.edge_index, G.edge_weight
 
     if edge_weight is None:
         edge_weight = torch.ones(

@@ -107,7 +107,6 @@ def coarsen(
 def coarse_one_level(
     G,
     B,
-    K=10,
     method="variation_neighborhoods",
     algorithm="greedy",
     level=1,
@@ -123,8 +122,8 @@ def coarse_one_level(
         if level == 1:
             A = B
         else:
-            if method != "learning_subspace":
-                B = torch.sparse.mm(G.C, B)
+            # if method != "learning_subspace":
+            #     B = torch.sparse.mm(G.C, B)
             d, V = torch.linalg.eigh(B.T @ G.L @ B)
             # X_init = torch.randn(B.shape[1], K, device=G.L.device)
             # d, V = torch.lobpcg(
@@ -135,14 +134,23 @@ def coarse_one_level(
             mask = d < 1e-10
             d[mask] = 1
             # dinvsqrt = d ** (0)
-            if method in ["variation_edges", "variation_embedding", "learning_subspace"]:
+            if method in [
+                "variation_edges",
+                "variation_embedding",
+                "learning_subspace",
+            ]:
                 dinvsqrt = d ** (-0.5)
             elif method == "gang_edges":
                 dinvsqrt = d ** (+0.5)
             # dinvsqrt = d ** (-0.5)
             dinvsqrt[mask] = 0
             A = B @ V @ torch.diag(dinvsqrt) @ V.T
-        if method in ["variation_edges", "gang_edges", "variation_embedding", "learning_subspace"]:
+        if method in [
+            "variation_edges",
+            "gang_edges",
+            "variation_embedding",
+            "learning_subspace",
+        ]:
             coarsening_list, sigma_l, done_flag = contract_variation_edges(
                 G,
                 A=A,
@@ -167,24 +175,6 @@ def coarse_one_level(
                 A=A,
                 r=r_cur,
                 mode=method,
-                similarity_threshold=similarity_threshold,
-                max_sigma=max_sigma,
-            )
-    else:
-        weights = get_proximity_measure(G, method, K=K)
-
-        if algorithm == "optimal":
-            # the edge-weight should be light at proximal edges
-            weights = -weights
-            if "rss" not in method:
-                weights -= min(weights)
-            coarsening_list = matching_optimal(G, weights=weights, r=r_cur)
-
-        elif algorithm == "greedy":
-            coarsening_list, sigma_l, done_flag = matching_greedy(
-                G,
-                weights=weights,
-                r=r_cur,
                 similarity_threshold=similarity_threshold,
                 max_sigma=max_sigma,
             )
@@ -425,9 +415,9 @@ def calc_C_plus(C):
 def calc_L(L, C_plus):
     """Project the Laplacian to the coarse space."""
     L_c = torch.sparse.mm(torch.sparse.mm(C_plus.t(), L), C_plus)
-    L_c = (
-        L_c + L_c.t()
-    ) / 2  # this is only needed to avoid pygsp complaining for tiny errors
+    # L_c = (
+    #     L_c + L_c.t()
+    # ) / 2  # this is only needed to avoid pygsp complaining for tiny errors
     # Coalesce to ensure consistent sparse format for downstream operations
     if L_c.is_sparse:
         L_c = L_c.coalesce()
@@ -886,274 +876,6 @@ def contract_variation_linear(
 ################################################################################
 # Edge-based contraction algorithms
 ################################################################################
-
-
-def get_proximity_measure(G: Data, name, K=10):
-
-    N = G.num_nodes
-    W = G.W  # np.array(G.W.toarray(), dtype=np.float32)
-    deg = degree(G.edge_index, G.num_nodes, G.edge_weight)  # np.sum(W, axis=0)
-    edges = G.edge_index
-    weights = G.edge_weight
-    M = edges.shape[1]
-
-    num_vectors = K  # int(1*K*np.log(K))
-    if "lanczos" in name:
-        L = G.L  # Assuming this returns a sparse tensor
-        # Ensure sparse tensor is coalesced for lobpcg compatibility
-        if L.is_sparse:
-            L = L.coalesce()
-        # torch.lobpcg has issues with sparse tensors in some PyTorch versions.
-        # Use dense eigendecomposition for reliability.
-        L_dense = L.to_dense() if L.is_sparse else L
-        # Get smallest K eigenvalues/eigenvectors (excluding zero eigenvalue)
-        l_all, X_all = torch.linalg.eigh(L_dense)
-        # Take the smallest K+1 eigenvectors (skip the first one which is constant)
-        l_lan = l_all[1 : K + 1]
-        X_lan = X_all[:, 1 : K + 1]
-    elif "cheby" in name:
-        e = "laplacian of G"
-        X_cheby = generate_test_vectors(
-            G, num_vectors=num_vectors, method="Chebychev", lambda_cut=G.e[K + 1]
-        )
-    elif "JC" in name:
-        X_jc = generate_test_vectors(
-            G, num_vectors=num_vectors, method="JC", iterations=20
-        )
-    elif "GS" in name:
-        X_gs = generate_test_vectors(
-            G, num_vectors=num_vectors, method="GS", iterations=1
-        )
-    if "expected" in name:
-        X = G.embeddings
-        assert not torch.isnan(X).any()
-        assert X.shape[0] == N
-        K = X.shape[1]
-
-    proximity = torch.zeros(M, dtype=torch.float32)
-
-    # heuristic for mutligrid
-    if name == "heavy_edge":
-        wmax = torch.tensor(torch.max(G.W, 0).todense())[0] + 1e-5
-        for e in range(0, M):
-            proximity[e] = weights[e] / max(
-                wmax[edges[:, e]]
-            )  # select edges with large proximity
-        return proximity
-
-    # heuristic for mutligrid
-    elif name == "algebraic_JC":
-        proximity += torch.inf
-        for e in range(0, M):
-            i, j = edges[:, e]
-            for kIdx in range(num_vectors):
-                xk = X_jc[:, kIdx]
-                proximity[e] = min(
-                    proximity[e], 1 / max(torch.abs(xk[i] - xk[j]) ** 2, 1e-6)
-                )  # select edges with large proximity
-
-        return proximity
-
-    # heuristic for mutligrid
-    elif name == "affinity_GS":
-        c = torch.zeros((N, N))
-        for e in range(0, M):
-            i, j = edges[:, e]
-            c[i, j] = (X_gs[i, :] @ X_gs[j, :].T) ** 2 / (
-                (X_gs[i, :] @ X_gs[i, :].T) ** 2 * (X_gs[j, :] @ X_gs[j, :].T) ** 2
-            )  # select
-
-        c += c.T
-        c -= torch.diag(torch.diag(c))
-        for e in range(0, M):
-            i, j = edges[:, e]
-            proximity[e] = c[i, j] / (max(c[i, :]) * max(c[j, :]))
-
-        return proximity
-
-    for e in range(0, M):
-        i, j = edges[:, e]
-
-        if name == "heavy_edge_degree":
-            proximity[e] = (
-                deg[i] + deg[j] + 2 * G.W[i, j]
-            )  # select edges with large proximity
-
-        # loose as little information as possible (custom)
-        elif "min_expected_loss" in name:
-            for kIdx in range(1, K):
-                xk = X[:, kIdx]
-                proximity[e] = sum(
-                    [proximity[e], (xk[i] - xk[j]) ** 2]
-                )  # select edges with small proximity
-        # loose as little gradient information as possible (custom)
-        elif name == "min_expected_gradient_loss":
-            for kIdx in range(1, K):
-                xk = X[:, kIdx]
-                proximity[e] = sum(
-                    [
-                        proximity[e],
-                        (xk[i] - xk[j]) ** 2 * (deg[i] + deg[j] + 2 * G.W[i, j]),
-                    ]
-                )  # select edges with small proximity
-
-        # relaxation ensuring that K first eigenspaces are aligned (custom)
-        elif name == "rss":
-            for kIdx in range(1, K):
-                xk = G.U[:, kIdx]
-                lk = G.e[kIdx]
-                proximity[e] = sum(
-                    [
-                        proximity[e],
-                        (xk[i] - xk[j]) ** 2
-                        * ((deg[i] + deg[j] + 2 * G.W[i, j]) / 4)
-                        / lk,
-                    ]
-                )  # select edges with small proximity
-
-        # fast relaxation ensuring that K first eigenspaces are aligned (custom)
-        elif name == "rss_lanczos":
-            for kIdx in range(1, K):
-                xk = X_lan[:, kIdx]
-                lk = l_lan[kIdx]
-                proximity[e] = sum(
-                    [
-                        proximity[e],
-                        (xk[i] - xk[j]) ** 2
-                        * ((deg[i] + deg[j] + 2 * G.W[i, j]) / 4 - 0.5 * (lk + lk))
-                        / lk,
-                    ]
-                )  # select edges with small proximity
-
-        # approximate relaxation ensuring that K first eigenspaces are aligned (custom)
-        elif name == "rss_cheby":
-            for kIdx in range(num_vectors):
-                xk = X_cheby[:, kIdx]
-                lk = xk.T @ G.L @ xk
-                proximity[e] = sum(
-                    [
-                        proximity[e],
-                        (
-                            (xk[i] - xk[j]) ** 2
-                            * ((deg[i] + deg[j] + 2 * G.W[i, j]) / 4 - 0 * lk)
-                            / lk
-                        ),
-                    ]
-                )  # select edges with small proximity
-
-        # heuristic for mutligrid (algebraic multigrid)
-        elif name == "algebraic_GS":
-            proximity[e] = torch.inf
-            for kIdx in range(num_vectors):
-                xk = X_gs[:, kIdx]
-                proximity[e] = min(
-                    proximity[e], 1 / max(torch.abs(xk[i] - xk[j]) ** 2, 1e-6)
-                )  # select edges with large proximity
-
-    if ("rss" in name) or ("expected" in name):
-        proximity = -proximity
-
-    return proximity
-
-
-def generate_test_vectors(
-    G, num_vectors=10, method="Gauss-Seidel", iterations=5, lambda_cut=0.1
-):
-
-    L = G.L
-    N = G.num_nodes
-    X = torch.randn(N, num_vectors) / torch.sqrt(N)
-
-    if method == "GS" or method == "Gauss-Seidel":
-        # Extract upper triangular part (excluding diagonal)
-        indices = L.indices()
-        values = L.values()
-
-        # Create mask for upper triangular elements (i < j)
-        upper_mask = indices[0] < indices[1]
-        # Create mask for lower triangular elements (including diagonal) (i >= j)
-        lower_diag_mask = indices[0] >= indices[1]
-
-        # Create L_upper (strictly upper triangular part)
-        L_upper_indices = indices[:, upper_mask]
-        L_upper_values = values[upper_mask]
-        L_upper = torch.sparse_coo_tensor(L_upper_indices, L_upper_values, L.shape)
-
-        # Create L_lower_diag (lower triangular part including diagonal)
-        L_lower_diag_indices = indices[:, lower_diag_mask]
-        L_lower_diag_values = values[lower_diag_mask]
-        L_lower_diag = torch.sparse_coo_tensor(
-            L_lower_diag_indices, L_lower_diag_values, L.shape
-        )
-
-        # Convert to CSR format for more efficient operations
-        L_upper = L_upper.coalesce()
-        L_lower_diag = L_lower_diag.coalesce()
-
-        for j in range(num_vectors):
-            x = X[:, j]
-            for t in range(iterations):
-                # Compute right hand side: -L_upper @ x
-                rhs = -torch.sparse.mm(L_upper, x.unsqueeze(1)).squeeze()
-
-            # Solve L_lower_diag @ x_new = rhs using forward substitution
-            x_new = torch.zeros_like(x)
-            for i in range(N):
-                # Get row i of L_lower_diag
-                row_indices = (L_lower_diag.indices()[0] == i).nonzero().squeeze()
-                if len(row_indices.shape) == 0:  # Handle scalar case
-                    row_indices = row_indices.unsqueeze(0)
-
-                col_indices = L_lower_diag.indices()[1][row_indices]
-                row_values = L_lower_diag.values()[row_indices]
-
-                # Compute x[i] = (rhs[i] - sum(L[i,j] * x[j] for j < i)) / L[i,i]
-                # Note: We only need to consider j < i for forward substitution
-                diag_idx = (col_indices == i).nonzero().squeeze()
-                if (
-                    len(diag_idx.shape) == 0 and diag_idx.nelement() > 0
-                ):  # Handle scalar case
-                    diag_idx = diag_idx.unsqueeze(0)
-
-                if diag_idx.nelement() > 0:  # Check if diagonal element exists
-                    diag_val = row_values[diag_idx]
-                off_diag_mask = col_indices < i
-                if off_diag_mask.any():
-                    off_diag_sum = torch.sum(
-                        row_values[off_diag_mask] * x_new[col_indices[off_diag_mask]]
-                    )
-                    x_new[i] = (rhs[i] - off_diag_sum) / diag_val
-                else:
-                    x_new[i] = rhs[i] / diag_val
-
-            x = x_new
-
-            X[:, j] = x
-        return X
-
-    if method == "JC" or method == "Jacobi":
-
-        deg = degree(G.edge_index, G.num_nodes, G.edge_weight)
-        indices = torch.arange(len(deg)).repeat(2, 1)
-        D = torch.sparse_coo_tensor(indices, deg, (len(deg), len(deg)))
-        # D = sp.sparse.diags(deg, 0)
-        deginv = deg ** (-1)
-        deginv[deginv == torch.inf] = 0
-        Dinv = torch.sparse_coo_tensor(indices, deginv, (len(deginv), len(deginv)))
-        M = Dinv.dot(D - L)
-
-        for j in range(num_vectors):
-            x = X[:, j]
-            for t in range(iterations):
-                x = 0.5 * x + 0.5 * M.dot(x)
-            X[:, j] = x
-        return X
-
-    elif method == "Chebychev":
-        from pygsp import filters
-
-        f = filters.Filter(G, lambda x: ((x <= lambda_cut) * 1).astype(torch.float32))
-        return f.filter(X, method="chebyshev", order=50)
 
 
 def matching_optimal(edge_index, num_nodes, weights, r=0.4):

@@ -9,7 +9,6 @@ import os
 import sys
 from pathlib import Path
 
-from src.GangPrediction.gang_aware_subspace import get_gang_aware_basis
 from src.GangPrediction.utils.plot_gif import (
     get_pattern_colors_and_positions,
     make_gif_with_patterns,
@@ -21,7 +20,6 @@ sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
 project_root = Path.cwd()
 sys.path.insert(0, str(project_root))
 
-from src.GangPrediction.coarsening_utils import calc_B_embedding, calc_B
 from src.GangPrediction.utils.utils import LOGGER
 from src.GangPrediction.GNN_model import evaluate_model
 from src.GangPrediction.train_GNN_coarsening import (
@@ -46,7 +44,7 @@ warnings.filterwarnings("ignore")
 # Configuration
 # ============================================================================
 
-EXPERIMENT = "tutorial_demo5"
+EXPERIMENT = "tutorial_demo12"
 # METHOD = "variation_neighborhood"
 # METHOD = "min_expected_gradient_loss"
 # METHOD = "edge_gangs"
@@ -56,12 +54,12 @@ METHOD = "learning_subspace"
 MAX_LEVELS = 1000  # Max coarsening levels
 EPOCHS_PER_LEVEL = [5]  # Can simplify to [1] for quick tests
 THRESHOLD = 0.0  # Coarsening threshold
-MAX_EPSILON = 10  # Max coarsening epsilons
-# MAX_EPSILON = float("inf")  # Max coarsening epsilons
+# MAX_EPSILON = 10  # Max coarsening epsilons
+MAX_EPSILON = float("inf")  # Max coarsening epsilons
 # Training hyperparameters
 TRAIN_CONFIG = {
     "K": 100,
-    "nhid": 8,
+    "nhid": 16,
     "lr": 0.001,
     "wd": 1e-6,
     "dropout": 0.2,
@@ -79,7 +77,6 @@ TRAIN_CONFIG = {
 # Pattern detection thresholds
 ALERT_THRESHOLDS = (0.5, 0.5)  # (majority, coarsening)
 NORMAL_THRESHOLDS = (0.5, 0.5)
-PROB_THRESHOLD = 0.3
 
 PLOT_GIFS = False
 
@@ -167,11 +164,10 @@ def run_experiment():
     prec_baseline = baseline_results["precision_test"]
 
     # Ground truth stats
-    gt_labels = G.y
-    n_suspicious_gt = (gt_labels == 1).sum().item()
+    n_suspicious_gt = (G.y == 1).sum().item()
     LOGGER.info(
-        f"Ground truth: {n_suspicious_gt}/{len(gt_labels)} suspicious "
-        f"({100*n_suspicious_gt/len(gt_labels):.2f}%)"
+        f"Ground truth: {n_suspicious_gt}/{len(G.y)} suspicious "
+        f"({100*n_suspicious_gt/len(G.y):.2f}%)"
     )
 
     # for threshold in THRESHOLDS:

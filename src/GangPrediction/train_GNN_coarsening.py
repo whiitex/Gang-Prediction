@@ -5,6 +5,7 @@ import sys
 import numpy as np
 from tqdm import tqdm
 
+from src.GangPrediction.experiment_utils import get_node_to_supernode_mapping
 from src.GangPrediction.gang_aware_subspace import get_gang_aware_basis
 
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
@@ -246,9 +247,9 @@ def train_GNN_coarsening_aware_loss(
                     data.x, data.edge_index, data.edge_weight
                 )
                 # Recompute orthonormal basis from current embeddings
-                V = calc_B_from_embeddings(G_embeddings, K=min(K, data.num_nodes))
-                # B = B @ C
+                V = calc_B_from_embeddings(G_embeddings)
                 B_C = torch.sparse.mm(C, V)  # Update B for the current coarsened graph
+                # B_C = calc_B_from_embeddings(embeddings)
 
         # max_eps_in_level += max_epsilon / levels
         max_sigma = (max_epsilon + 1) / (epsilon_l + 1) - 1
@@ -256,7 +257,6 @@ def train_GNN_coarsening_aware_loss(
         Gc, B, sigma_l, done_flag = coarse_one_level(
             Gc,
             B=B_C if method == "learning_subspace" and train else B,
-            K=K,
             method=method,
             algorithm=algorithm,
             similarity_threshold=similarity_threshold,
@@ -290,14 +290,13 @@ def train_GNN_coarsening_aware_loss(
                     # train the GNN on the coarsened graph
                     train_loss, train_acc = train_gnn_1_epoch(
                         model,
-                        optimizer,
-                        criterion,
-                        Gc,
-                        C_plus,
-                        P,
-                        Gc.L,
-                        original_data.y,
-                        original_data.train_idx,
+                        optimizer=optimizer,
+                        criterion=criterion,
+                        data=Gc,
+                        C_plus=C_plus,
+                        P=P,
+                        L=data.L,
+                        original_data=original_data,
                         coarse_loss=epoch < active_coarse_loss_epochs,
                         class_weights=class_weights,
                     )
@@ -332,7 +331,7 @@ def train_GNN_coarsening_aware_loss(
                 # Skip training at this level, use last known values
                 train_loss = loss_history[-1] if loss_history else 0.0
                 epochs_per_level_history.append(0)
-                scheduler.step(train_loss)
+                # scheduler.step(train_loss)
 
         else:
             train_loss = 0.0  # No training, so loss is 0

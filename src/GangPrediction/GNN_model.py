@@ -124,8 +124,8 @@ class GCN(nn.Module):
         self.convs = nn.ModuleList()
         # GINConv requires an MLP as input
         self.convs.append(
-            # GINConv(
-            WeightedGINConv(
+            GINConv(
+                # WeightedGINConv(
                 nn.Sequential(
                     nn.Linear(nfeat, nhid),
                     nn.ReLU(),
@@ -136,7 +136,8 @@ class GCN(nn.Module):
         )  # First layer
         for _ in range(n_layers - 2):  # Hidden layers
             self.convs.append(
-                WeightedGINConv(
+                # WeightedGINConv(
+                GINConv(
                     nn.Sequential(
                         nn.Linear(nhid, nhid),
                         nn.ReLU(),
@@ -146,7 +147,8 @@ class GCN(nn.Module):
                 # GCNConv(nhid, nhid)
             )
         self.convs.append(
-            WeightedGINConv(
+            # WeightedGINConv(
+            GINConv(
                 nn.Sequential(
                     nn.Linear(nhid, nhid),
                     nn.ReLU(),
@@ -159,16 +161,20 @@ class GCN(nn.Module):
     def forward(self, x, edge_index, edge_weight=None):
         """Compute logits for each node."""
         for i, conv in enumerate(self.convs[:-1]):
-            x = F.relu(conv(x, edge_index, edge_weight))
+            x = F.relu(conv(x, edge_index))
+            # x = F.relu(conv(x, edge_index, edge_weight))
             x = F.dropout(x, self.dropout, training=self.training)
-        x = self.convs[-1](x, edge_index, edge_weight)
+        x = self.convs[-1](x, edge_index)
+        # x = self.convs[-1](x, edge_index, edge_weight)
         return x
 
     def get_embeddings(self, x, edge_index, edge_weight=None):
         """Return intermediate node embeddings (pre-classifier)."""
         for conv in self.convs[:-2]:
-            x = F.relu(conv(x, edge_index, edge_weight))
-        x = self.convs[-2](x, edge_index, edge_weight)
+            x = F.relu(conv(x, edge_index))
+            # x = F.relu(conv(x, edge_index, edge_weight))
+        x = self.convs[-2](x, edge_index)
+        # x = self.convs[-2](x, edge_index, edge_weight)
         return x
 
     def reset_parameters(self):
@@ -184,8 +190,7 @@ def train_gnn_1_epoch(
     C_plus=None,
     P=None,
     L=None,
-    y=None,
-    train_idx: list = None,
+    original_data=None,
     coarse_loss: bool = False,
     class_weights: torch.Tensor = None,
 ):
@@ -203,8 +208,8 @@ def train_gnn_1_epoch(
     optimizer.zero_grad()
 
     # S_mp = data.S_mp if hasattr(data, "S_mp") else data.W
-    y = y if y is not None else data.y
-    train_idx = train_idx if train_idx is not None else data.train_idx
+    y = original_data.y if original_data is not None else data.y
+    train_idx = original_data.train_idx if original_data is not None else data.train_idx
 
     logits = model(
         data.x,
@@ -223,12 +228,15 @@ def train_gnn_1_epoch(
     # embeddings = model.get_embeddings(data.x, data.edge_index, data.edge_weight if hasattr(data, "edge_weight") else None)
 
     # train
-    embeddings = data.embeddings if hasattr(data, "embeddings") else None
-    # embeddings = model.get_embeddings(
-    #     data.x,
-    #     data.edge_index,
-    #     data.edge_weight if hasattr(data, "edge_weight") else None,
-    # )
+    # embeddings = data.embeddings if hasattr(data, "embeddings") else None
+    if original_data is not None and coarse_loss:
+        embeddings = model.get_embeddings(
+            original_data.x,
+            original_data.edge_index,
+            original_data.edge_weight if hasattr(data, "edge_weight") else None,
+        )
+    else:
+        embeddings = None
     # embeddings = F.normalize(embeddings, p=2, dim=1)
     loss = criterion(
         logits, y, train_idx, embeddings, coarse_loss=coarse_loss, P=P, L=L
