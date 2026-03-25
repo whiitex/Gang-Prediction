@@ -1,4 +1,4 @@
 count,type,min_accounts,max_accounts,bank_id
-650,fan_out,5,15,
-650,fan_in,5,15,
-650,forward,5,5,
+300,fan_out,5,15,
+300,fan_in,5,15,
+300,forward,5,5,

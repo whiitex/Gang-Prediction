@@ -11,9 +11,8 @@ from torch_sparse import SparseTensor
 from sortedcontainers import SortedList
 from tqdm import tqdm
 
-from src.GangPrediction.utils.utils import degree, graph_params, sparse_eye
 from src.GangPrediction.maxWeightMatching import maxWeightMatching
-from utils.utils import *
+from src.GangPrediction.utils.utils import *
 
 
 def coarsen(
@@ -118,70 +117,49 @@ def coarse_one_level(
 
     done_flag = False
 
-    if "variation" in method or method == "learning_subspace":
-        if level == 1:
-            A = B
+    if level == 1:
+        A = B
+    else:
+        d, V = torch.linalg.eigh(B.T @ G.L @ B)
+        # X_init = torch.randn(B.shape[1], K, device=G.L.device)
+        # d, V = torch.lobpcg(
+        #     B.T @ G.L @ B, k=K, X=X_init, largest=False, niter=50, tol=1e-4
+        # )
+        # d = torch.ones(K, device=G.L.device)
+        # V = torch.eye(K, device=G.L.device)
+        mask = d < 1e-10
+        d[mask] = 1
+        # dinvsqrt = d ** (0)
+        if method == "gang_edges":
+            dinvsqrt = d ** (+0.5)
         else:
-            # if method != "learning_subspace":
-            #     B = torch.sparse.mm(G.C, B)
-            d, V = torch.linalg.eigh(B.T @ G.L @ B)
-            # X_init = torch.randn(B.shape[1], K, device=G.L.device)
-            # d, V = torch.lobpcg(
-            #     B.T @ G.L @ B, k=K, X=X_init, largest=False, niter=50, tol=1e-4
-            # )
-            # d = torch.ones(K, device=G.L.device)
-            # V = torch.eye(K, device=G.L.device)
-            mask = d < 1e-10
-            d[mask] = 1
-            # dinvsqrt = d ** (0)
-            if method in [
-                "variation_edges",
-                "variation_embedding",
-                "learning_subspace",
-            ]:
-                dinvsqrt = d ** (-0.5)
-            elif method == "gang_edges":
-                dinvsqrt = d ** (+0.5)
-            # dinvsqrt = d ** (-0.5)
-            dinvsqrt[mask] = 0
-            A = B @ V @ torch.diag(dinvsqrt) @ V.T
-        if method in [
-            "variation_edges",
-            "gang_edges",
-            "variation_embedding",
-            "learning_subspace",
-        ]:
-            coarsening_list, sigma_l, done_flag = contract_variation_edges(
-                G,
-                A=A,
-                r=r_cur,
-                algorithm=algorithm,
-                similarity_threshold=similarity_threshold,
-                max_sigma=max_sigma,
-            )
-        # elif method == "variation_embedding":
-        #     coarsening_list, sigma_l, done_flag = contract_variation_edges(
-        #         G,
-        #         A=A,
-        #         # A=G.embeddings,
-        #         r=r_cur,
-        #         algorithm=algorithm,
-        #         similarity_threshold=similarity_threshold,
-        #         max_sigma=max_sigma,
-        #     )
-        else:
-            coarsening_list, sigma_l, done_flag = contract_variation_linear(
-                G,
-                A=A,
-                r=r_cur,
-                mode=method,
-                similarity_threshold=similarity_threshold,
-                max_sigma=max_sigma,
-            )
+            dinvsqrt = d ** (-0.5)
+        # dinvsqrt = d ** (-0.5)
+        dinvsqrt[mask] = 0
+        A = B @ V @ torch.diag(dinvsqrt) @ V.T
+
+    if method == "variation_neighborhood":
+        coarsening_list, sigma_l, done_flag = contract_variation_linear(
+            G,
+            A=A,
+            r=r_cur,
+            mode=method,
+            similarity_threshold=similarity_threshold,
+            max_sigma=max_sigma,
+        )
+    else:
+        coarsening_list, sigma_l, done_flag = contract_variation_edges(
+            G,
+            A=A,
+            r=r_cur,
+            algorithm=algorithm,
+            similarity_threshold=similarity_threshold,
+            max_sigma=max_sigma,
+        )
 
     iC = get_coarsening_matrix(coarsening_list, G.num_nodes)
 
-    Gc = construct_G(G, iC)
+    Gc, B = construct_G(G, B, iC)
 
     return Gc, B, sigma_l, done_flag
 
@@ -346,7 +324,7 @@ def arnoldi_iteration(A, m: int, b=None, log=True):
 ################################################################################
 
 
-def construct_G(G: Data, iC: SparseTensor):
+def construct_G(G: Data, B: torch.Tensor, iC: SparseTensor):
     """Build a coarsened PyG Data graph from a coarsening matrix."""
     C_plus = calc_C_plus(iC)
     L = calc_L(G.L, C_plus)
@@ -396,7 +374,9 @@ def construct_G(G: Data, iC: SparseTensor):
     if hasattr(G, "colors") and G.colors is not None:
         Gc.colors = coarsen_vector(G.colors, iC)
 
-    return Gc
+    B = torch.sparse.mm(Gc.C, B)
+
+    return Gc, B
 
 
 def calc_C_plus(C):
@@ -789,10 +769,13 @@ def contract_variation_linear(
             edges = G.edge_index
             for e in range(0, edges.shape[1]):
                 [u, v] = edges[:, e]
+                u_i = int(u)
+                v_i = int(v)
                 for w in range(G.num_nodes):
                     if G.W[u, w] > 0 and G.W[v, w] > 0:
-                        triangles.add(frozenset([u, v, w]))
-            triangles = list(map(lambda x: torch.tensor(list(x)), triangles))
+                        w_i = int(w)
+                        triangles.add(tuple(sorted((u_i, v_i, w_i))))
+            triangles = [torch.tensor(t, dtype=torch.long) for t in sorted(triangles)]
             for triangle in triangles:
                 family.append(CandidateSet(triangle))
 

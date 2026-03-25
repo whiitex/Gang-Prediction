@@ -1,7 +1,10 @@
 """Shared utilities for data prep, sparse ops, and graph algebra."""
 
-from datetime import datetime
 import os
+import random
+from datetime import datetime
+
+
 import torch
 import numpy as np
 from torch_geometric.data import Data
@@ -14,6 +17,11 @@ from torch_geometric.utils import (
 from pygsp import graphs
 import scipy as sp
 from src.GangPrediction.utils.logger import getLOGGER
+
+seed = 5
+torch.manual_seed(seed)
+np.random.seed(seed)
+random.seed(seed)
 
 now = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -28,12 +36,11 @@ LOGGER = getLOGGER(
 )
 
 
+# NOTE: This module uses sparse COO tensors in multiple places.
+# On Apple Silicon, sparse ops on MPS are still incomplete for this pipeline,
+# so prefer CUDA when available, otherwise fall back to CPU (not MPS).
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-
-seed = 4
-torch.manual_seed(seed)
-np.random.seed(seed)
 
 
 def create_pyg_data(features, edges_idx, labels) -> Data:
@@ -94,8 +101,8 @@ def degree(edge_index, num_nodes, edge_weights=None):
 def sparse_eye(size):
     """Create a sparse identity matrix."""
     indices = torch.arange(size).repeat(2, 1)
-    values = torch.ones(size)
-    C = torch.sparse_coo_tensor(indices, values, (size, size))
+    values = torch.ones(size, dtype=torch.float32, device=device)
+    C = torch.sparse_coo_tensor(indices, values, (size, size), device=device)
     return C
 
 
@@ -139,7 +146,7 @@ def create_P(indices, n, device="cpu"):
             torch.arange(n_t, device=device),  # Row indices
         ]
     )
-    P_values = torch.ones(n_t, device=device)
+    P_values = torch.ones(n_t, dtype=torch.float32, device=device)
     P = torch.sparse_coo_tensor(P_indices, P_values, (n, n_t), device=device)
     return P
 

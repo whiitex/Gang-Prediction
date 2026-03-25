@@ -3,6 +3,8 @@
 import numpy as np
 import torch
 
+from src.GangPrediction.utils.utils import *
+
 
 def get_neighbors(G, i):
     """Return neighbor indices for a pygsp graph node."""
@@ -52,14 +54,14 @@ def zero_diag(A):
     if hasattr(A, "is_sparse") and A.is_sparse:
         indices = A.indices()
         values = A.values()
-                
+
         # Find diagonal entries (where row == col)
         diag_mask = indices[0, :] == indices[1, :]
-                
+
         # Create new indices and values excluding diagonal elements
         new_indices = indices[:, ~diag_mask]
         new_values = values[~diag_mask]
-                
+
         # Create a new sparse tensor without diagonal elements
         return torch.sparse.FloatTensor(new_indices, new_values, A.shape)
     else:

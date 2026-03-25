@@ -1,16 +1,15 @@
 """Loss and helpers for training across coarsened graph levels."""
 
 import torch
-
-# import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.data import Data
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 # graph coarsening - Loukas 2020
 from src.GangPrediction.coarsening_utils import *
 from src.GangPrediction.graph_utils import *
+from src.GangPrediction.experiment_utils import create_subspace
+from src.GangPrediction.utils.utils import *
 
 
 class SupernodeEmbeddingLoss(nn.Module):
@@ -62,101 +61,132 @@ class SupernodeEmbeddingLoss(nn.Module):
             Combined loss scalar
         """
         device = embeddings.device
-
-        # Combine all patterns (both alert and normal patterns define supernodes)
-        all_patterns = []
-        if alert_patterns:
-            all_patterns.extend(alert_patterns)
-        if normal_patterns:
-            all_patterns.extend(normal_patterns)
-
-        if len(all_patterns) == 0:
-            return torch.tensor(0.0, device=device, requires_grad=True)
-
-        # Normalize embeddings for stability
-        # embeddings_norm = F.normalize(embeddings, p=2, dim=1)
-
-        intra_loss = torch.tensor(0.0, device=device)
-        negative_loss = torch.tensor(0.0, device=device)
-        n_valid_patterns = 0
-
-        # Collect all pattern centroids for negative sampling
-        pattern_centroids = []
-        sum_nodes = 0
-        for pattern in all_patterns:
-            pattern_embeddings = embeddings[pattern.node_indices]
-
-            # Compute centroid of the supernode
-            centroid = pattern_embeddings.mean(dim=0, keepdim=True)
-            pattern_centroids.append(centroid)
-
-            # 1. Intra-supernode consistency loss
-            # All nodes in the same supernode should have the same embedding
-            if len(pattern.node_indices) >= 2:
-                # Variance within supernode (want to minimize)
-                # Using MSE from centroid
-                intra_distances = ((pattern_embeddings - centroid) ** 2).sum(dim=1)
-                intra_loss += intra_distances.sum()
-
-            n_valid_patterns += 1
-            sum_nodes += pattern.num_nodes
-
-        intra_loss = intra_loss / (sum_nodes + 1e-6)  # Average per node
-
-        # 2. Negative sampling loss (prevent collapse)
-        # Push apart centroids of different supernodes
-        if len(pattern_centroids) >= 2:
-            centroids = torch.cat(pattern_centroids, dim=0)  # [K, D]
-            # normalized_centroids = F.normalize(
-            #     centroids, p=2, dim=1
-            # )  # Normalize for cosine similarity
-
-            # Compute pairwise similarities between all centroids
-            similarity_matrix = torch.mm(
-                centroids,
-                centroids.T,
-                # normalized_centroids, normalized_centroids.T
-            )  # [K, K]
-
-            # Create mask to exclude self-similarity
-            mask = torch.eye(len(pattern_centroids), device=device, dtype=torch.bool)
-
-            # InfoNCE-style loss: maximize log probability of NOT being the same supernode
-            # For each centroid, the negatives are all other centroids
-            similarity_matrix = similarity_matrix.masked_fill(mask, float("-inf"))
-
-            # We want to MINIMIZE similarity between different supernodes
-            # Use negative log of (1 - softmax) approximation
-            # Simplified: push apart using hinge loss
-            off_diag_similarities = similarity_matrix[~mask].view(
-                len(pattern_centroids), -1
-            )
-
-            # Hinge loss: penalize if similarity > -margin (i.e., if too similar)
-            margin = -0.5  # Want similarities to be < -0.5 (i.e., dissimilar)
-            negative_loss = F.relu(off_diag_similarities - margin).mean()
-
-        # Also add variance maximization to prevent collapse to a single point
-        if len(pattern_centroids) >= 2:
-            centroids = torch.cat(pattern_centroids, dim=0)
-            centroid_variance = centroids.var(dim=0).mean()
-            # We want to maximize variance (minimize negative variance)
-            variance_loss = 1.0 / (centroid_variance + 1e-6)
-            negative_loss = negative_loss + 0.0 * variance_loss
-            # negative_loss = negative_loss + 0.1 * variance_loss
-
-        # Normalize losses
-        intra_loss = intra_loss / n_valid_patterns
-
-        total_loss = (
-            self.intra_weight * intra_loss + self.negative_weight * negative_loss
+        N = embeddings.shape[0]
+        V = create_subspace(alert_patterns, normal_patterns, N, device)
+        alert_nodes = set()
+        for pattern in alert_patterns:
+            alert_nodes.update(pattern.node_indices)
+        normal_nodes = set()
+        for pattern in normal_patterns:
+            normal_nodes.update(pattern.node_indices)
+        total_pattern_nodes = torch.tensor(
+            list(alert_nodes.union(normal_nodes)), device=device, dtype=torch.long
         )
+        loss = (
+            torch.sum((embeddings[total_pattern_nodes] - V[total_pattern_nodes]) ** 2)
+            / N
+        )
+        return loss
 
-        return total_loss
+    # def forward(
+    #     self,
+    #     embeddings: torch.Tensor,
+    #     alert_patterns: Dict[str, List[int]] = None,
+    #     normal_patterns: Dict[str, List[int]] = None,
+    # ) -> torch.Tensor:
+    #     """
+    #     Compute supernode embedding loss.
 
+    #     Args:
+    #         embeddings: [N, D] node embeddings from GNN
+    #         alert_patterns: Dict mapping pattern_id -> list of node indices
+    #         normal_patterns: Dict mapping pattern_id -> list of node indices
 
-import torch
-import torch.nn as nn
+    #     Returns:
+    #         Combined loss scalar
+    #     """
+    #     device = embeddings.device
+
+    #     # Combine all patterns (both alert and normal patterns define supernodes)
+    #     all_patterns = []
+    #     if alert_patterns:
+    #         all_patterns.extend(alert_patterns)
+    #     if normal_patterns:
+    #         all_patterns.extend(normal_patterns)
+
+    #     if len(all_patterns) == 0:
+    #         return torch.tensor(0.0, device=device, requires_grad=True)
+
+    #     # Normalize embeddings for stability
+    #     # embeddings_norm = F.normalize(embeddings, p=2, dim=1)
+
+    #     intra_loss = torch.tensor(0.0, device=device)
+    #     negative_loss = torch.tensor(0.0, device=device)
+    #     n_valid_patterns = 0
+
+    #     # Collect all pattern centroids for negative sampling
+    #     pattern_centroids = []
+    #     sum_nodes = 0
+    #     for pattern in all_patterns:
+    #         pattern_embeddings = embeddings[pattern.node_indices]
+
+    #         # Compute centroid of the supernode
+    #         centroid = pattern_embeddings.mean(dim=0, keepdim=True)
+    #         pattern_centroids.append(centroid)
+
+    #         # 1. Intra-supernode consistency loss
+    #         # All nodes in the same supernode should have the same embedding
+    #         if len(pattern.node_indices) >= 2:
+    #             # Variance within supernode (want to minimize)
+    #             # Using MSE from centroid
+    #             intra_distances = ((pattern_embeddings - centroid) ** 2).sum(dim=1)
+    #             intra_loss += intra_distances.mean()
+
+    #         n_valid_patterns += 1
+    #         sum_nodes += pattern.num_nodes
+
+    #     # intra_loss = intra_loss / (sum_nodes + 1e-6)  # Average per node
+
+    #     # 2. Negative sampling loss (prevent collapse)
+    #     # Push apart centroids of different supernodes
+    #     if len(pattern_centroids) >= 2:
+    #         centroids = torch.cat(pattern_centroids, dim=0)  # [K, D]
+    #         # normalized_centroids = F.normalize(
+    #         #     centroids, p=2, dim=1
+    #         # )  # Normalize for cosine similarity
+
+    #         # Compute pairwise similarities between all centroids
+    #         similarity_matrix = torch.mm(
+    #             centroids,
+    #             centroids.T,
+    #             # normalized_centroids, normalized_centroids.T
+    #         )  # [K, K]
+
+    #         # Create mask to exclude self-similarity
+    #         mask = torch.eye(len(pattern_centroids), device=device, dtype=torch.bool)
+
+    #         # InfoNCE-style loss: maximize log probability of NOT being the same supernode
+    #         # For each centroid, the negatives are all other centroids
+    #         similarity_matrix = similarity_matrix.masked_fill(mask, float("-inf"))
+
+    #         # We want to MINIMIZE similarity between different supernodes
+    #         # Use negative log of (1 - softmax) approximation
+    #         # Simplified: push apart using hinge loss
+    #         off_diag_similarities = similarity_matrix[~mask].view(
+    #             len(pattern_centroids), -1
+    #         )
+
+    #         # Hinge loss: penalize if similarity > -margin (i.e., if too similar)
+    #         margin = -0.5  # Want similarities to be < -0.5 (i.e., dissimilar)
+    #         negative_loss = F.relu(off_diag_similarities - margin).mean()
+
+    #     # Also add variance maximization to prevent collapse to a single point
+    #     if len(pattern_centroids) >= 2:
+    #         centroids = torch.cat(pattern_centroids, dim=0)
+    #         centroid_variance = centroids.var(dim=0).mean()
+    #         # We want to maximize variance (minimize negative variance)
+    #         variance_loss = 1.0 / (centroid_variance + 1e-6)
+    #         negative_loss = negative_loss + 0.0 * variance_loss
+    #         # negative_loss = negative_loss + 0.1 * variance_loss
+
+    #     # Normalize losses
+    #     intra_loss = intra_loss / n_valid_patterns
+
+    #     total_loss = (
+    #         self.intra_weight * intra_loss + self.negative_weight * negative_loss
+    #     )
+
+    #     return total_loss
 
 
 def l_orthonormalize(Z, L, eps=1e-6, remove_constant=True):
@@ -243,8 +273,8 @@ class CoarseningAwareLoss(nn.Module):
         inter_weight: float = 1.0,
         # Supernode embedding loss parameters
         use_supernode_loss: bool = True,
-        supernode_intra_weight: float = 1.0,
-        supernode_negative_weight: float = 5,
+        supernode_intra_weight: float = 100.0,
+        supernode_negative_weight: float = 0,
     ):
         """
         Args:
@@ -423,6 +453,10 @@ class CoarseningAwareLoss(nn.Module):
                 alert_patterns=self.alert_patterns,
                 normal_patterns=self.normal_patterns,
             )
+            # loss_supernode += torch.norm(
+            #     embeddings.T @ L @ embeddings - torch.eye(embeddings.shape[1], device=P.device),
+            #     p="fro",
+            # )
 
         if surrogate_epsilon:
             U = l_orthonormalize(embeddings, L)
@@ -438,102 +472,3 @@ class CoarseningAwareLoss(nn.Module):
             + 1 * epsillon_loss
         )
         # return loss_cls + self.coarse_weight * loss_pattern + loss_supernode
-
-
-def apply_graph_coarsening(
-    G: Data,
-    # X=None,
-    method="variation_neighborhoods",
-    ratio=0.5,
-    K=3,
-    similarity_threshold=0.65,
-    max_levels=1,
-    log_info=False,
-):
-    """
-    Output:
-      - C: coarsening matrix (n, N)
-      - Gc: coarsened graph (n, n)
-      - Call: all coarsened graphs (levels, n_l, N)
-      - Gall: all original graphs (levels, n_l, n_l)
-    """
-
-    available_methods = [
-        "variation_neighborhoods",
-        "variation_edges",
-        "heavy_edge",
-        "algebraic_JC",
-        "kron",
-    ]
-    if method not in available_methods:
-        raise ValueError(
-            f"Unknown coarsening method: {method}. Method must be one of {available_methods}."
-        )
-
-    C, Gc, Call, Gall = coarsen(
-        G,
-        K=K,
-        method=method,
-        r=ratio,
-        similarity_threshold=similarity_threshold,
-        max_levels=max_levels,
-    )
-
-    if log_info:
-        print(f"Coarsening: {method} ", end="")
-        print(
-            f"({G.num_nodes} n, {G.num_edges} e) -> ({Gc.num_nodes} n, {Gc.num_edges} e); "
-        )
-
-    return C, Gc, Call, Gall
-
-
-def get_coarsened_edges_and_features(C: list, Gc: Data):
-    """
-    Coarsen edges and features based on the coarsening matrix C;
-    the feature matrix (N x D) is made by summing up features from nodes that are coarsened into the same supernode.
-
-    Output:
-      - Gc: coarsened edges index (num_edges, 2)
-      - features_coarsened: coarsened features (num_nodes_coarsened, num_features)
-    """
-
-    idx_map = {}  # map fine node -> coarse node
-    for supernode, node in zip(*C.nonzero()):
-        idx_map[node] = supernode
-
-    # features coarsened
-    features_coarsened = C @ Gc.x
-
-    # edges coarsened
-    edges_idx_coarsened = Gc.edge_index
-
-    return edges_idx_coarsened, features_coarsened
-
-
-def get_coarsened_labels(C: list, labels):
-    """
-    Coarsen edges and features based on the coarsening matrix C;
-    the feature matrix (N x D) is made by summing up features from nodes that are coarsened into the same supernode.
-
-    Output:
-      - edges_idx_coarsened: coarsened edges index (num_edges, 2)
-      - features_coarsened: coarsened features (num_nodes_coarsened, num_features)
-      - labels_coarsened: coarsened labels (num_nodes_coarsened,)
-    """
-
-    # labels coarsened
-    device = labels.device
-    num_classes = len(torch.unique(labels))
-
-    # Create one-hot encoding of labels
-    labels_onehot = torch.zeros(len(labels), num_classes, device=device)
-    labels_onehot.scatter_(1, labels.view(-1, 1), 1)
-
-    # Compute label counts per supernode using matrix multiplication
-    all_labels = C @ labels_onehot
-
-    # Get the most common label for each supernode
-    labels_coarsened = torch.argmax(all_labels, dim=1)
-
-    return labels_coarsened

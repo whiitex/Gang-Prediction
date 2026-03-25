@@ -1,5 +1,6 @@
 """Utility functions for pattern loading, evaluation, and experiment setup."""
 
+import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -11,7 +12,9 @@ import torch_geometric.transforms
 from sklearn.preprocessing import MinMaxScaler
 
 from src.GangPrediction.pattern_models import Pattern, create_pattern
-from src.GangPrediction.utils.utils import graph_params
+from src.feature_engineering import DataPreprocessor
+from src.utils.config import load_preprocessing_config
+from src.GangPrediction.utils.utils import *
 
 
 def _capture_pattern_lineage(
@@ -83,20 +86,114 @@ def get_node_to_supernode_mapping(C):
     return torch.argmax(C_dense, dim=0)
 
 
-def load_amlgentex_data(config_dir: Path):
+def load_and_preprocess_data(
+    data_dir: Path,
+    patterns_dir: Path,
+    train_ratio: float = 0.5,
+    to_undirected: bool = True,
+    device: Optional[torch.device] = "cpu",
+) -> Tuple[torch_geometric.data.Data, List[Pattern], List[Pattern]]:
     """
     Load and preprocess AMLGentex dataset.
 
     Args:
-        config_dir: Path to config directory
-        config_dir: Path to config directory
+        data_dir: Path to data directory
+        patterns_dir: Path to patterns directory
+        device: Device to use for tensor operations
+        train_ratio: Ratio of patterns to use for training
+        to_undirected: Whether to convert the graph to undirected
 
     Returns:
         G: PyTorch Geometric Data object
         node_to_index: Dict mapping account IDs to node indices
     """
-    from src.feature_engineering import DataPreprocessor
-    from src.utils.config import load_preprocessing_config
+
+    G, node_to_index = load_amlgentex_data(data_dir, to_undirected, device=device)
+
+    # Load patterns
+    alert_patterns, normal_patterns = load_all_patterns(patterns_dir, node_to_index)
+
+    # Preprocess overlaps so each node belongs to at most one pattern.
+    # Alert patterns take priority over normal patterns for cross-class conflicts.
+    alert_patterns, normal_patterns, overlap_stats = (
+        preprocess_patterns_with_alert_priority(
+            alert_patterns,
+            normal_patterns,
+            labels=G.y,
+        )
+    )
+    print("\nPattern overlap preprocessing summary:")
+    print(
+        f"  Alert patterns: {overlap_stats['alert_patterns_before']} -> {overlap_stats['alert_patterns_after']} "
+        f"(removed empty: {overlap_stats['removed_alert_patterns_empty']})"
+    )
+    print(
+        f"  Normal patterns: {overlap_stats['normal_patterns_before']} -> {overlap_stats['normal_patterns_after']} "
+        f"(removed empty: {overlap_stats['removed_normal_patterns_empty']})"
+    )
+    print(
+        f"  Assigned nodes: alert={overlap_stats['assigned_alert_nodes']}, "
+        f"normal={overlap_stats['assigned_normal_nodes']}, total={overlap_stats['assigned_total_nodes']}"
+    )
+
+    # Split patterns into train and test sets
+    print("\n" + "=" * 60)
+    print("Splitting Patterns into Train/Test Sets")
+    print(f"  Train ratio: {train_ratio}")
+    print("=" * 60)
+
+    alert_train, alert_test = split_patterns(
+        alert_patterns,
+        train_ratio=train_ratio,
+        seed=seed,
+    )
+    normal_train, normal_test = split_patterns(
+        normal_patterns,
+        train_ratio=train_ratio,
+        seed=seed,
+    )
+
+    print(f"  Alert patterns: {len(alert_train)} train, {len(alert_test)} test")
+    print(f"  Normal patterns: {len(normal_train)} train, {len(normal_test)} test")
+
+    # Get node indices from train patterns to use as training nodes
+    alert_train_nodes = get_pattern_node_indices(alert_train)
+    normal_train_nodes = get_pattern_node_indices(normal_train)
+
+    # Combine train nodes from both alert and normal patterns
+    train_nodes = torch.unique(torch.cat([alert_train_nodes, normal_train_nodes]))
+    # test_nodes = torch.unique(torch.cat([alert_test_nodes, normal_test_nodes]))
+    all_nodes = torch.arange(G.num_nodes)
+    test_nodes = all_nodes[
+        ~torch.isin(all_nodes, train_nodes)
+    ]  # Use all nodes for testing to evaluate generalization
+
+    # Update graph training masks to use pattern-based nodes
+    print(f"\n  Training nodes from patterns: {len(train_nodes)}")
+    print(f"  Test nodes from patterns: {len(test_nodes)}")
+
+    # Override train/val/test indices with pattern-based split
+    G.train_idx = train_nodes
+    G.val_idx = test_nodes  # Use test patterns for validation
+    G.test_idx = test_nodes  # Use test patterns for testing
+
+    return G, alert_train, normal_train, alert_test, normal_test
+
+
+def load_amlgentex_data(
+    config_dir: Path, to_undirected: bool = True, device: Optional[torch.device] = "cpu"
+) -> Tuple[torch_geometric.data.Data, dict]:
+    """
+    Load and preprocess AMLGentex dataset.
+
+    Args:
+        config_dir: Path to config directory
+        to_undirected: Whether to convert the graph to undirected
+
+    Returns:
+        G: PyTorch Geometric Data object
+        node_to_index: Dict mapping account IDs to node indices
+    """
 
     preproc_config = load_preprocessing_config(str(config_dir / "preprocessing.yaml"))
 
@@ -147,17 +244,18 @@ def load_amlgentex_data(config_dir: Path):
     edges_df["dst_idx"] = edges_df["dst"].map(node_to_index)
     edges_df = edges_df.dropna(subset=["src_idx", "dst_idx"])
     edges = edges_df[["src_idx", "dst_idx"]].to_numpy().astype(np.int64)
-    edges_index = torch.tensor(edges.T, dtype=torch.long)
+    edges_index = torch.tensor(edges.T, dtype=torch.long).to(device)
 
     # Normalize features
     scaler = MinMaxScaler().fit(X)
-    X_normalized = torch.tensor(scaler.transform(X), dtype=torch.float32)
-    y = torch.tensor(y, dtype=torch.int64)
+    X_normalized = torch.tensor(scaler.transform(X), dtype=torch.float32, device=device)
+    y = torch.tensor(y, dtype=torch.int64, device=device)
 
     # Create PyG Data object
     G = torch_geometric.data.Data(x=X_normalized, edge_index=edges_index, y=y)
-    # G = torch_geometric.transforms.ToUndirected()(G)
-    G.edge_weight = torch.ones(G.edge_index.size(1))
+    if to_undirected:
+        G = torch_geometric.transforms.ToUndirected()(G)
+    G.edge_weight = torch.ones(G.edge_index.size(1), dtype=torch.float32, device=device)
     # G.train_idx = train_idx
     # G.val_idx = val_idx
     # G.test_idx = test_idx
@@ -186,9 +284,6 @@ def split_patterns(
         test_patterns: Dict of test patterns
         test_types: Dict of test pattern types
     """
-    import random
-
-    random.seed(seed)
 
     random.shuffle(patterns)
 
@@ -214,7 +309,7 @@ def get_pattern_node_indices(patterns: dict) -> torch.Tensor:
     for pattern in patterns:
         all_nodes.update(pattern.node_indices)
 
-    return torch.tensor(list(all_nodes), dtype=torch.long)
+    return torch.tensor(sorted(all_nodes), dtype=torch.long)
 
 
 def load_all_patterns(experiment_root: Path, node_to_index: dict):
@@ -256,3 +351,104 @@ def load_all_patterns(experiment_root: Path, node_to_index: dict):
         print("\nNo normal patterns file found")
 
     return alert_patterns, normal_patterns
+
+
+def preprocess_patterns_with_alert_priority(
+    alert_patterns: List[Pattern],
+    normal_patterns: List[Pattern],
+    labels: Optional[torch.Tensor] = None,
+) -> Tuple[List[Pattern], List[Pattern], Dict[str, int]]:
+    """Resolve node overlap so each node belongs to exactly one pattern.
+
+    Rules:
+    - Alert patterns have priority over normal patterns.
+    - Within the same class, first pattern in list order keeps the node.
+    - Patterns left with zero nodes are removed.
+    - If labels tensor is provided, assigned alert/normal nodes are forced to 1/0.
+    """
+
+    def _unique_ordered(nodes) -> List[int]:
+        seen = set()
+        uniq = []
+        for n in nodes:
+            idx = int(n)
+            if idx not in seen:
+                seen.add(idx)
+                uniq.append(idx)
+        return uniq
+
+    assigned_nodes = set()
+    assigned_to_alert = set()
+    assigned_to_normal = set()
+
+    def _assign_patterns(patterns: List[Pattern], target: str) -> List[Pattern]:
+        cleaned = []
+        for pattern in patterns:
+            nodes = _unique_ordered(pattern.node_indices)
+            kept_nodes = []
+            for node in nodes:
+                if node in assigned_nodes:
+                    continue
+                assigned_nodes.add(node)
+                kept_nodes.append(node)
+                if target == "alert":
+                    assigned_to_alert.add(node)
+                else:
+                    assigned_to_normal.add(node)
+
+            pattern.nodes = kept_nodes
+            pattern.label = target
+            if kept_nodes:
+                cleaned.append(pattern)
+        return cleaned
+
+    # Alert first => cross-class conflicts resolve to alert.
+    alert_clean = _assign_patterns(alert_patterns, "alert")
+    normal_clean = _assign_patterns(normal_patterns, "normal")
+
+    if labels is not None:
+        if assigned_to_alert:
+            alert_idx = torch.tensor(
+                sorted(assigned_to_alert), dtype=torch.long, device=labels.device
+            )
+            labels[alert_idx] = 1
+        if assigned_to_normal:
+            normal_idx = torch.tensor(
+                sorted(assigned_to_normal), dtype=torch.long, device=labels.device
+            )
+            labels[normal_idx] = 0
+
+    stats = {
+        "alert_patterns_before": len(alert_patterns),
+        "normal_patterns_before": len(normal_patterns),
+        "alert_patterns_after": len(alert_clean),
+        "normal_patterns_after": len(normal_clean),
+        "removed_alert_patterns_empty": len(alert_patterns) - len(alert_clean),
+        "removed_normal_patterns_empty": len(normal_patterns) - len(normal_clean),
+        "assigned_alert_nodes": len(assigned_to_alert),
+        "assigned_normal_nodes": len(assigned_to_normal),
+        "assigned_total_nodes": len(assigned_nodes),
+    }
+
+    return alert_clean, normal_clean, stats
+
+
+def create_subspace(alert_patterns, normal_patterns, num_nodes, device):
+    # Create binary indicator matrices for alert and normal patterns
+    alert_pattern_types = sorted(set(p.pattern_type for p in alert_patterns))
+    normal_pattern_types = sorted(set(p.pattern_type for p in normal_patterns))
+    V_alert = torch.zeros((num_nodes, len(alert_pattern_types)), device=device)
+    V_normal = torch.zeros((num_nodes, len(normal_pattern_types)), device=device)
+    pattern_type_to_idx_alert = {t: i for i, t in enumerate(alert_pattern_types)}
+    pattern_type_to_idx_normal = {t: i for i, t in enumerate(normal_pattern_types)}
+    for p in alert_patterns:
+        idx = pattern_type_to_idx_alert[p.pattern_type]
+        V_alert[p.nodes, idx] = 1.0
+    for p in normal_patterns:
+        idx = pattern_type_to_idx_normal[p.pattern_type]
+        V_normal[p.nodes, idx] = 1.0
+    # Orthonormalize the bases using SVD
+    U_alert, _, _ = torch.svd(V_alert)
+    U_normal, _, _ = torch.svd(V_normal)
+    U = torch.cat([U_alert, U_normal], dim=1)
+    return U

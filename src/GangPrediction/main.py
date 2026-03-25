@@ -1,155 +1,85 @@
-"""Experiment driver for coarsening-aware training on AMLGentex.
-
-This is the main experiment runner that uses utility functions from:
-- src.GangPrediction.experiment_utils: Data loading, pattern evaluation
-- src.GangPrediction.plotting: Unified plotting functions
-"""
-
 import os
+import shutil
 import sys
 from pathlib import Path
 
-from src.GangPrediction.utils.plot_gif import (
-    get_pattern_colors_and_positions,
-    make_gif_with_patterns,
-    save_pattern_graph_with_legend,
-)
 
 # Setup paths
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
 project_root = Path.cwd()
 sys.path.insert(0, str(project_root))
 
-from src.GangPrediction.utils.utils import LOGGER
+import warnings
+
+warnings.filterwarnings("ignore")
+
 from src.GangPrediction.GNN_model import evaluate_model
 from src.GangPrediction.train_GNN_coarsening import (
     train_GNN_coarsening_aware_loss,
     train_GNN,
 )
 from src.GangPrediction.experiment_utils import (
-    load_amlgentex_data,
-    load_all_patterns,
-    split_patterns,
-    get_pattern_node_indices,
+    create_subspace,
+    load_and_preprocess_data,
 )
 from src.GangPrediction.plotting import plot_all_results
+from src.GangPrediction.embedding_diagnostics import (
+    plot_diagnostic_trends,
+    generate_diagnostic_plots_for_final_state,
+)
+from src.GangPrediction.utils.plot_gif import (
+    get_pattern_colors_and_positions,
+    make_gif_with_patterns,
+    save_pattern_graph_with_legend,
+)
+from src.utils.config_parser import load_main_config
 from src.GangPrediction.utils.utils import *
-
-import warnings
-
-warnings.filterwarnings("ignore")
 
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
-EXPERIMENT = "tutorial_demo12"
-# METHOD = "variation_neighborhood"
-# METHOD = "min_expected_gradient_loss"
-# METHOD = "edge_gangs"
-METHOD = "learning_subspace"
-# METHOD = "variation_edges"
-# METHOD = "variation_embedding"
-MAX_LEVELS = 1000  # Max coarsening levels
-EPOCHS_PER_LEVEL = [5]  # Can simplify to [1] for quick tests
-THRESHOLD = 0.0  # Coarsening threshold
-# MAX_EPSILON = 10  # Max coarsening epsilons
-MAX_EPSILON = float("inf")  # Max coarsening epsilons
-# Training hyperparameters
-TRAIN_CONFIG = {
-    "K": 100,
-    "nhid": 16,
-    "lr": 0.001,
-    "wd": 1e-6,
-    "dropout": 0.2,
-    # "grad_clip": 1.0,
-    # "warmup_epochs": 3,
-    "initial_epochs": 3,
-    "min_epochs": 1,
-    "max_epoch_interval": 3,
-    "loss_window": 10,
-    "loss_threshold": 0.002,
-    "alpha": 1.0,  # Smoothing strength (higher = smoother patterns)
-    "compression_method": "svd",  # "svd" for PCA-style, "lda" for Fisher LDA
-}
+CONFIG_PATH = project_root / "config.yaml"
+CONFIG = load_main_config(CONFIG_PATH)
 
-# Pattern detection thresholds
-ALERT_THRESHOLDS = (0.5, 0.5)  # (majority, coarsening)
-NORMAL_THRESHOLDS = (0.5, 0.5)
-
-PLOT_GIFS = False
-
-# Pattern-based train/test split configuration
-PATTERN_SPLIT_CONFIG = {
-    "train_ratio": 0.5,  # Fraction of patterns used for training
-    "seed": 42,  # Random seed for reproducibility
-}
+EXPERIMENT = CONFIG["experiment"]
+METHOD = CONFIG["method"]
+MAX_LEVELS = int(CONFIG["max_levels"])  # Max coarsening levels
+THRESHOLD = float(CONFIG["threshold"])  # Coarsening threshold
+MAX_EPSILON = float(CONFIG["max_epsilon"])  # Max coarsening epsilon
+TRAIN_CONFIG = CONFIG["train_config"]
+ALERT_THRESHOLDS = CONFIG["alert_thresholds"]  # (majority, coarsening)
+NORMAL_THRESHOLDS = CONFIG["normal_thresholds"]
+PLOT_GIFS = bool(CONFIG["plot_gifs"])
+PATTERN_SPLIT_CONFIG = CONFIG["pattern_split_config"]
 
 
 # ============================================================================
 # Main Experiment
 # ============================================================================
-
-
 def run_experiment():
     """Run the coarsening-aware GNN training experiment."""
+    # Keep an exact copy of the run configuration next to generated artifacts.
+    shutil.copy2(CONFIG_PATH, Path(save_path) / CONFIG_PATH.name)
+
     # Setup paths
     experiment_root = project_root / "experiments" / EXPERIMENT
-    config_dir = experiment_root / "config"
 
     # Load data
     print("=" * 60)
     print("Loading AMLGentex Dataset")
     print("=" * 60)
-    G, node_to_index = load_amlgentex_data(config_dir)
-
-    # Load patterns
-    alert_patterns, normal_patterns = load_all_patterns(experiment_root, node_to_index)
-
-    # Split patterns into train and test sets
-    print("\n" + "=" * 60)
-    print("Splitting Patterns into Train/Test Sets")
-    print(f"  Train ratio: {PATTERN_SPLIT_CONFIG['train_ratio']}")
-    print("=" * 60)
-
-    alert_train, alert_test = split_patterns(
-        alert_patterns,
-        train_ratio=PATTERN_SPLIT_CONFIG["train_ratio"],
-        seed=PATTERN_SPLIT_CONFIG["seed"],
+    G, alert_train, normal_train, alert_test, normal_test = load_and_preprocess_data(
+        data_dir=experiment_root / "config",
+        patterns_dir=experiment_root,
+        train_ratio=PATTERN_SPLIT_CONFIG.get("train_ratio", 0.5),
+        to_undirected="variation" in METHOD.lower(),
+        device=device,
     )
-    normal_train, normal_test = split_patterns(
-        normal_patterns,
-        train_ratio=PATTERN_SPLIT_CONFIG["train_ratio"],
-        seed=PATTERN_SPLIT_CONFIG["seed"],
-    )
-
-    print(f"  Alert patterns: {len(alert_train)} train, {len(alert_test)} test")
-    print(f"  Normal patterns: {len(normal_train)} train, {len(normal_test)} test")
-
-    # Get node indices from train patterns to use as training nodes
-    alert_train_nodes = get_pattern_node_indices(alert_train)
-    normal_train_nodes = get_pattern_node_indices(normal_train)
-    alert_test_nodes = get_pattern_node_indices(alert_test)
-    normal_test_nodes = get_pattern_node_indices(normal_test)
-
-    # Combine train nodes from both alert and normal patterns
-    train_nodes = torch.unique(torch.cat([alert_train_nodes, normal_train_nodes]))
-    test_nodes = torch.unique(torch.cat([alert_test_nodes, normal_test_nodes]))
-
-    # Update graph training masks to use pattern-based nodes
-    print(f"\n  Training nodes from patterns: {len(train_nodes)}")
-    print(f"  Test nodes from patterns: {len(test_nodes)}")
-
-    # Override train/val/test indices with pattern-based split
-    G.train_idx = train_nodes
-    G.val_idx = test_nodes  # Use test patterns for validation
-    G.test_idx = test_nodes  # Use test patterns for testing
 
     if PLOT_GIFS:
-        colors0, pos0 = get_pattern_colors_and_positions(
-            G, alert_patterns, normal_patterns
-        )
+        colors0, pos0 = get_pattern_colors_and_positions(G, alert_train, normal_train)
         G.colors = torch.tensor(colors0, dtype=torch.float32, device=device)
         pos = [vals for vals in pos0.values()]
         G.pos = torch.tensor(pos, dtype=torch.float32, device=device)
@@ -239,14 +169,34 @@ def run_experiment():
         baseline_accuracy=acc_test,
         baseline_precision=prec_baseline,
         coarse_accuracy=acc_coarse,
-        has_alert_patterns=bool(alert_patterns),
-        has_normal_patterns=bool(normal_patterns),
+        has_alert_patterns=bool(alert_train),
+        has_normal_patterns=bool(normal_train),
         smooth=False,
         alert_coarse_th=ALERT_THRESHOLDS[1],
         alert_majority_th=ALERT_THRESHOLDS[0],
         normal_coarse_th=NORMAL_THRESHOLDS[1],
         normal_majority_th=NORMAL_THRESHOLDS[0],
         name_prefix="",
+    )
+
+    plot_diagnostic_trends(results_history=results_history, save_dir=str(save_path))
+
+    model.eval()
+    with torch.no_grad():
+        final_embeddings = model.get_embeddings(
+            G.x,
+            G.edge_index,
+            G.edge_weight if hasattr(G, "edge_weight") else None,
+        )
+        # N = G.num_nodes
+        # final_embeddings = create_subspace(alert_test, normal_test, N, device)
+    learned_basis = getattr(model, "latest_learned_basis_rows", None)
+    generate_diagnostic_plots_for_final_state(
+        embeddings=final_embeddings,
+        alert_patterns=alert_test,
+        normal_patterns=normal_test,
+        save_dir=str(save_path),
+        basis_rows=learned_basis,
     )
 
     LOGGER.info(f"Plots saved to {save_path}")

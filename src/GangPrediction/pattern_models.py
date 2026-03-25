@@ -7,6 +7,8 @@ import numpy as np
 import torch
 from sklearn.metrics import precision_recall_curve, roc_auc_score, auc
 
+from src.GangPrediction.utils.utils import *
+
 
 @dataclass
 class PatternLevelSnapshot:

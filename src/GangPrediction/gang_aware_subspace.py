@@ -21,7 +21,8 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 from torch_geometric.data import Data
 
-from src.GangPrediction.utils.utils import graph_params
+from src.GangPrediction.pattern_models import Pattern
+from src.GangPrediction.utils.utils import *
 
 
 def build_gang_aware_basis(
@@ -116,7 +117,7 @@ def build_gang_aware_basis(
     if not ensure_orthogonal:
         tol = 1e-6
         diag = torch.abs(torch.diag(R))
-        rank = (diag > tol)
+        rank = diag > tol
 
         V = V[:, :rank]
 
@@ -198,8 +199,8 @@ def build_gang_aware_basis_lda(
 
 def _build_seed_vectors(
     n: int,
-    malicious_patterns: Dict[str, List[int]],
-    normal_patterns: Dict[str, List[int]],
+    alert_patterns: List[Pattern],
+    normal_patterns: List[Pattern],
     add_discrimination_seed: bool = True,
     normalize_seeds: bool = True,
     device: str = "cpu",
@@ -216,9 +217,9 @@ def _build_seed_vectors(
     ----------
     n : int
         Number of nodes in the graph.
-    malicious_patterns : Dict
-        Malicious patterns.
-    normal_patterns : Dict
+    alert_patterns : List[Pattern]
+        Alert patterns.
+    normal_patterns : List[Pattern]
         Normal patterns.
     add_discrimination_seed : bool
         Add mean_malicious - mean_normal as extra seed.
@@ -244,7 +245,9 @@ def _build_seed_vectors(
     used_nodes = set() if ensure_orthogonal else None
 
     # Process malicious patterns
-    for pattern_id, node_indices in malicious_patterns.items():
+    for pattern in alert_patterns:
+        node_indices = pattern.node_indices
+
         if ensure_orthogonal:
             # Filter out nodes already used in previous patterns
             unique_indices = [idx for idx in node_indices if idx not in used_nodes]
@@ -259,7 +262,8 @@ def _build_seed_vectors(
     n_malicious = len(seeds)
 
     # Process normal patterns
-    for pattern_id, node_indices in normal_patterns.items():
+    for pattern in normal_patterns:
+        node_indices = pattern.node_indices
         if ensure_orthogonal:
             # Filter out nodes already used in previous patterns
             unique_indices = [idx for idx in node_indices if idx not in used_nodes]

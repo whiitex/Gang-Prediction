@@ -1,27 +1,90 @@
 """GNN model definition and training/evaluation helpers."""
 
-from pathlib import Path
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, SAGEConv, GATConv, GraphConv, GINConv
 import torch.optim as optim
-
-# torch geometric
 from torch_geometric.data import Data
-
-from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
+from torch_geometric.nn import MessagePassing
+from sklearn.metrics import accuracy_score, roc_auc_score
 
 from src.GangPrediction.pattern_models import Pattern
 from src.ml.metrics.metrics import average_precision_score
-
 from src.GangPrediction.experiment_utils import (
     _capture_pattern_lineage,
     get_node_to_supernode_mapping,
 )
+from src.GangPrediction.embedding_diagnostics import (
+    compute_embedding_and_basis_diagnostics,
+)
+from src.GangPrediction.utils.utils import *
 
-from torch_geometric.nn import MessagePassing
+
+def build_gnn_model(
+    nfeat, nhid, nclass, num_layers, use_edge_weights=False, GNN_type="GIN"
+):
+    """Factory function to create a GNN model with the specified architecture."""
+    if GNN_type == "GIN":
+        return Build_GINConv(nfeat, nhid, nclass, num_layers, use_edge_weights)
+    elif GNN_type == "GCN":
+        conv_layer = GCNConv
+    elif GNN_type == "SAGE":
+        conv_layer = SAGEConv
+    elif GNN_type == "GAT":
+        conv_layer = GATConv
+    elif GNN_type == "GraphConv":
+        conv_layer = GraphConv
+    else:
+        raise ValueError(f"Unsupported GNN type: {GNN_type}")
+
+    convs = nn.ModuleList()
+    convs.append(conv_layer(nfeat, nhid))  # First layer
+    for _ in range(num_layers - 2):  # Hidden layers
+        convs.append(conv_layer(nhid, nhid))
+    convs.append(conv_layer(nhid, nclass))  # Output layer
+
+    return convs
+
+
+def Build_GINConv(nfeat, nhid, nclass, num_layers, use_edge_weights=False):
+    """Factory function to create a GINConv layer with the given MLP."""
+    if use_edge_weights:
+        conv_layer = WeightedGINConv
+    else:
+        conv_layer = GINConv
+    convs = nn.ModuleList()
+    # GINConv requires an MLP as input
+    convs.append(
+        conv_layer(
+            nn.Sequential(
+                nn.Linear(nfeat, nhid),
+                nn.ReLU(),
+                nn.Linear(nhid, nhid),
+            ),
+        )
+    )  # First layer
+    for _ in range(num_layers - 2):  # Hidden layers
+        convs.append(
+            conv_layer(
+                nn.Sequential(
+                    nn.Linear(nhid, nhid),
+                    nn.ReLU(),
+                    nn.Linear(nhid, nhid),
+                )
+            )
+        )
+    convs.append(
+        conv_layer(
+            nn.Sequential(
+                nn.Linear(nhid, nhid),
+                nn.ReLU(),
+                nn.Linear(nhid, nclass),
+            ),
+        )
+    )  # Output layer
+
+    return convs
 
 
 class WeightedGINConv(MessagePassing):
@@ -46,135 +109,49 @@ class WeightedGINConv(MessagePassing):
 
 
 class GCN(nn.Module):
-
-    # def __init__(self, nfeat, nhid, nclass, dropout=0.5, n_layers=4):
-    #     super(GCN, self).__init__()
-    #     if n_layers < 2:
-    #         raise ValueError("n_layers must be at least 2")
-    #     self.dropout = dropout
-    #     self.n_layers = n_layers
-
-    #     n_hid1 = 8
-    #     n_hid2 = 16
-    #     n_hid3 = 32
-
-    #     # Build list of conv layers dynamically
-    #     self.convs = nn.ModuleList()
-    #     # GINConv requires an MLP as input
-    #     self.convs.append(
-    #         GINConv(
-    #             nn.Sequential(
-    #                 nn.Linear(nfeat, n_hid1),
-    #                 nn.ReLU(),
-    #                 nn.Linear(n_hid1, n_hid1),
-    #             ),
-    #         )
-    #         # GCNConv(nfeat, nhid)
-    #     )  # First layer
-    #     self.convs.append(
-    #         GINConv(
-    #             nn.Sequential(
-    #                 nn.Linear(n_hid1, n_hid2),
-    #                 nn.ReLU(),
-    #                 nn.Linear(n_hid2, n_hid2),
-    #             ),
-    #         )
-    #         # GCNConv(nfeat, nhid)
-    #     )  # First layer
-    #     self.convs.append(
-    #         GINConv(
-    #             nn.Sequential(
-    #                 nn.Linear(n_hid2, n_hid3),
-    #                 nn.ReLU(),
-    #                 nn.Linear(n_hid3, n_hid3),
-    #             ),
-    #         )
-    #         # GCNConv(nfeat, nhid)
-    #     )  # First layer
-    #     # for _ in range(n_layers - 2):  # Hidden layers
-    #     #     self.convs.append(
-    #     #         GINConv(
-    #     #             nn.Sequential(
-    #     #                 nn.Linear(n_hid1, n_hid2),
-    #     #                 nn.ReLU(),
-    #     #                 nn.Linear(n_hid2, n_hid2),
-    #     #             )
-    #     #         )
-    #     #         # GCNConv(nhid, nhid)
-    #     #     )
-    #     self.convs.append(
-    #         GINConv(
-    #             nn.Sequential(
-    #                 nn.Linear(n_hid3, n_hid3),
-    #                 nn.ReLU(),
-    #                 nn.Linear(n_hid3, nclass),
-    #             ),
-    #         )
-    #         # GCNConv(nhid, nclass)
-    #     )  # Output layer
-
-    def __init__(self, nfeat, nhid, nclass, dropout=0.5, n_layers=4):
+    def __init__(
+        self,
+        nfeat,
+        nhid,
+        nclass,
+        dropout=0.5,
+        num_layers=4,
+        use_edge_weights=False,
+        GNN_type="GIN",
+    ):
         super(GCN, self).__init__()
-        if n_layers < 2:
-            raise ValueError("n_layers must be at least 2")
+        if num_layers < 2:
+            raise ValueError("num_layers must be at least 2")
         self.dropout = dropout
-        self.n_layers = n_layers
+        self.num_layers = num_layers
+        self.use_edge_weights = use_edge_weights
 
-        # Build list of conv layers dynamically
-        self.convs = nn.ModuleList()
-        # GINConv requires an MLP as input
-        self.convs.append(
-            GINConv(
-                # WeightedGINConv(
-                nn.Sequential(
-                    nn.Linear(nfeat, nhid),
-                    nn.ReLU(),
-                    nn.Linear(nhid, nhid),
-                ),
-            )
-            # GCNConv(nfeat, nhid)
-        )  # First layer
-        for _ in range(n_layers - 2):  # Hidden layers
-            self.convs.append(
-                # WeightedGINConv(
-                GINConv(
-                    nn.Sequential(
-                        nn.Linear(nhid, nhid),
-                        nn.ReLU(),
-                        nn.Linear(nhid, nhid),
-                    )
-                )
-                # GCNConv(nhid, nhid)
-            )
-        self.convs.append(
-            # WeightedGINConv(
-            GINConv(
-                nn.Sequential(
-                    nn.Linear(nhid, nhid),
-                    nn.ReLU(),
-                    nn.Linear(nhid, nclass),
-                ),
-            )
-            # GCNConv(nhid, nclass)
-        )  # Output layer
+        self.convs = build_gnn_model(
+            nfeat, nhid, nclass, num_layers, use_edge_weights, GNN_type
+        )
+
+    def _apply_conv(self, conv, x, edge_index, edge_weight=None):
+        """Apply a conv layer while respecting layer-specific edge-weight support."""
+        supports_edge_weight = isinstance(conv, (GCNConv, GraphConv, WeightedGINConv))
+        if self.use_edge_weights and edge_weight is not None and supports_edge_weight:
+            return conv(x, edge_index, edge_weight)
+        return conv(x, edge_index)
 
     def forward(self, x, edge_index, edge_weight=None):
         """Compute logits for each node."""
         for i, conv in enumerate(self.convs[:-1]):
-            x = F.relu(conv(x, edge_index))
-            # x = F.relu(conv(x, edge_index, edge_weight))
+            x = F.relu(self._apply_conv(conv, x, edge_index, edge_weight))
             x = F.dropout(x, self.dropout, training=self.training)
-        x = self.convs[-1](x, edge_index)
-        # x = self.convs[-1](x, edge_index, edge_weight)
+
+        x = self._apply_conv(self.convs[-1], x, edge_index, edge_weight)
         return x
 
     def get_embeddings(self, x, edge_index, edge_weight=None):
         """Return intermediate node embeddings (pre-classifier)."""
         for conv in self.convs[:-2]:
-            x = F.relu(conv(x, edge_index))
-            # x = F.relu(conv(x, edge_index, edge_weight))
-        x = self.convs[-2](x, edge_index)
-        # x = self.convs[-2](x, edge_index, edge_weight)
+            x = F.relu(self._apply_conv(conv, x, edge_index, edge_weight))
+            # x = F.dropout(x, self.dropout, training=self.training)
+        x = self._apply_conv(self.convs[-2], x, edge_index, edge_weight)
         return x
 
     def reset_parameters(self):
@@ -271,11 +248,15 @@ def evaluate_model(
     normal_patterns=None,
     alert_thresholds=(0.75, 0.75),
     normal_thresholds=(0.5, 0.5),
+    basis_rows=None,
 ):
     """Evaluate the model on test set."""
 
     model.eval()
     # data = data.to(next(model.parameters()).device)
+
+    alert_patterns = alert_patterns or []
+    normal_patterns = normal_patterns or []
 
     with torch.no_grad():
         logits = model(
@@ -373,6 +354,26 @@ def evaluate_model(
         node_to_supernode=node_to_supernode,
         pseudo_labels=probs_fine,
     )
+
+    with torch.no_grad():
+        emb_source = original_data if original_data is not None else data
+        emb_rows = model.get_embeddings(
+            emb_source.x,
+            emb_source.edge_index,
+            emb_source.edge_weight if hasattr(emb_source, "edge_weight") else None,
+        )
+    diag = compute_embedding_and_basis_diagnostics(
+        emb_rows,
+        alert_patterns=alert_patterns,
+        normal_patterns=normal_patterns,
+        basis_rows=basis_rows,
+    )
+    results["embedding_diagnostics"] = {
+        "embedding": diag["embedding"],
+        "basis": diag["basis"],
+        "pattern_node_count": diag["pattern_node_count"],
+        "num_patterns": diag["num_patterns"],
+    }
 
     alert_metrics = Pattern.average_metrics(
         alert_patterns,

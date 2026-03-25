@@ -139,7 +139,7 @@ optimisation_bounds:
     std_phone_change_frequency_sar: [265, 465]
     mean_bank_change_frequency_sar: [1260, 1460]
     std_bank_change_frequency_sar: [265, 465]
-    prob_participate_in_multiple_sars: [0.0, 0.5]
+    prob_participate_in_multiple_sars: [0.0, 0.0]
     mean_duration_alert: [30.0, 60.0]
     std_duration_alert: [5.0, 20.0]
     burstiness_bias_alert: [-4.0, 4.0]
