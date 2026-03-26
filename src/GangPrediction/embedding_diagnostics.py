@@ -24,14 +24,16 @@ def _build_pattern_labels(
     num_nodes: int,
     alert_patterns: Optional[Iterable],
     normal_patterns: Optional[Iterable],
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Return per-node pattern-id and pattern-type labels.
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return per-node pattern-id, pattern-type, and pattern-subtype labels.
 
     pattern_id: -1 for unlabeled, otherwise contiguous id across alert+normal patterns.
     pattern_type: -1 for unlabeled, 1 for alert, 0 for normal.
+    pattern_subtype: object array of str, "" for unlabeled, e.g. "fan_in", "cycle".
     """
     pattern_id = np.full(num_nodes, -1, dtype=np.int32)
     pattern_type = np.full(num_nodes, -1, dtype=np.int8)
+    pattern_subtype = np.full(num_nodes, "", dtype=object)
 
     next_id = 0
     for p in alert_patterns or []:
@@ -40,6 +42,8 @@ def _build_pattern_labels(
             continue
         pattern_id[nodes] = next_id
         pattern_type[nodes] = 1
+        subtype = getattr(p, "pattern_type", "unknown")
+        pattern_subtype[nodes] = subtype
         next_id += 1
 
     for p in normal_patterns or []:
@@ -48,9 +52,11 @@ def _build_pattern_labels(
             continue
         pattern_id[nodes] = next_id
         pattern_type[nodes] = 0
+        subtype = getattr(p, "pattern_type", "unknown")
+        pattern_subtype[nodes] = subtype
         next_id += 1
 
-    return pattern_id, pattern_type
+    return pattern_id, pattern_type, pattern_subtype
 
 
 def _sample_indices(indices: np.ndarray, max_points: int, seed: int = 42) -> np.ndarray:
@@ -170,7 +176,7 @@ def compute_embedding_and_basis_diagnostics(
 ) -> Dict:
     """Compute diagnostics for embedding rows and optional basis rows."""
     emb_np = _safe_to_numpy(embeddings)
-    pattern_id, pattern_type = _build_pattern_labels(
+    pattern_id, pattern_type, pattern_subtype = _build_pattern_labels(
         emb_np.shape[0], alert_patterns, normal_patterns
     )
 
@@ -193,6 +199,7 @@ def compute_embedding_and_basis_diagnostics(
         "num_patterns": int(len(np.unique(pattern_id[pattern_id >= 0]))),
         "pattern_id": pattern_id,
         "pattern_type": pattern_type,
+        "pattern_subtype": pattern_subtype,
     }
 
 
@@ -370,10 +377,34 @@ def plot_embedding_tsne(
     *,
     pattern_id: np.ndarray,
     pattern_type: np.ndarray,
+    pattern_subtype: np.ndarray,
     save_dir: str,
     max_nodes: int = 2000,
 ) -> None:
-    """t-SNE of embedding rows colored by pattern ID and marked by pattern type."""
+    """t-SNE of embedding rows colored by pattern ID and marked by pattern type.
+
+    Produces three plots:
+    - Combined (different marker per pattern subtype)
+    - Alert-only (different marker per subtype)
+    - Normal-only (different marker per subtype)
+    """
+    # Marker map: each subtype gets a distinct shape
+    SUBTYPE_MARKERS = {
+        "fan_out": "v",            # triangle down
+        "fan_in": "^",             # triangle up
+        "cycle": "o",              # circle
+        "bipartite": "s",          # square
+        "stack": "D",              # diamond
+        "random": "P",             # plus (filled)
+        "scatter_gather": "*",     # star
+        "gather_scatter": "X",     # x (filled)
+        "single": ".",             # point
+        "forward": ">",            # triangle right
+        "mutual": "<",             # triangle left
+        "periodical": "p",         # pentagon
+    }
+    DEFAULT_MARKER = "h"  # hexagon fallback
+
     emb = _safe_to_numpy(embeddings)
     labeled = np.where(pattern_id >= 0)[0]
     if labeled.size < 3:
@@ -383,6 +414,7 @@ def plot_embedding_tsne(
     X = emb[idx]
     y_type = pattern_type[idx]
     y_pid = pattern_id[idx]
+    y_sub = pattern_subtype[idx]
 
     perplexity = float(max(5, min(30, (len(idx) - 1) // 3)))
     tsne = TSNE(
@@ -394,7 +426,6 @@ def plot_embedding_tsne(
     )
     Z = tsne.fit_transform(X)
 
-    fig, ax = plt.subplots(figsize=(10, 8))
     unique_patterns = np.unique(y_pid)
     num_patterns = len(unique_patterns)
     cmap_name = "tab20" if num_patterns <= 20 else "nipy_spectral"
@@ -402,45 +433,94 @@ def plot_embedding_tsne(
     pid_to_color = {pid: i for i, pid in enumerate(unique_patterns.tolist())}
     color_values = np.array([pid_to_color[pid] for pid in y_pid], dtype=np.int32)
 
-    normal = y_type == 0
-    alert = y_type == 1
+    normal_mask = y_type == 0
+    alert_mask = y_type == 1
 
-    # Color captures pattern identity; marker captures pattern type.
-    # sc_normal = ax.scatter(
-    #     Z[normal, 0],
-    #     Z[normal, 1],
-    #     c=color_values[normal],
-    #     cmap=cmap_name,
-    #     s=18,
-    #     alpha=0.75,
-    #     marker="o",
-    #     edgecolors="none",
-    #     label="normal",
-    # )
-    sc_alert = ax.scatter(
-        Z[alert, 0],
-        Z[alert, 1],
-        c=color_values[alert],
-        cmap=cmap_name,
-        s=24,
-        alpha=0.85,
-        marker="^",
-        edgecolors="black",
-        linewidths=0.2,
-        label="alert",
-    )
+    def _scatter_by_subtype(ax, mask, Z, color_values, y_sub, cmap_name, size, alpha, edge_color, lw):
+        """Plot each subtype with its own marker, return last scatter for colorbar."""
+        subtypes_in_mask = np.unique(y_sub[mask])
+        sc_ref = None
+        for st in subtypes_in_mask:
+            st_mask = mask & (y_sub == st)
+            if not st_mask.any():
+                continue
+            mkr = SUBTYPE_MARKERS.get(st, DEFAULT_MARKER)
+            sc_ref = ax.scatter(
+                Z[st_mask, 0],
+                Z[st_mask, 1],
+                c=color_values[st_mask],
+                cmap=cmap_name,
+                s=size,
+                alpha=alpha,
+                marker=mkr,
+                edgecolors=edge_color,
+                linewidths=lw,
+                label=st,
+            )
+        return sc_ref
 
-    cbar = plt.colorbar(sc_alert, ax=ax, fraction=0.03, pad=0.02)
-    cbar.set_label("Pattern ID (mapped)")
-
-    ax.set_title("t-SNE of Node Embeddings (Color: Pattern ID, Marker: Pattern Type)")
+    # --- Combined plot ---
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sc_ref = None
+    if normal_mask.any():
+        sc_ref = _scatter_by_subtype(
+            ax, normal_mask, Z, color_values, y_sub, cmap_name,
+            size=18, alpha=0.75, edge_color="none", lw=0,
+        )
+    if alert_mask.any():
+        sc_ref = _scatter_by_subtype(
+            ax, alert_mask, Z, color_values, y_sub, cmap_name,
+            size=24, alpha=0.85, edge_color="black", lw=0.2,
+        )
+    if sc_ref is not None:
+        cbar = plt.colorbar(sc_ref, ax=ax, fraction=0.03, pad=0.02)
+        cbar.set_label("Pattern ID (mapped)")
+    ax.set_title("t-SNE of Node Embeddings (Color: Pattern ID, Marker: Subtype)")
     ax.set_xlabel("t-SNE 1")
     ax.set_ylabel("t-SNE 2")
-    ax.legend()
+    ax.legend(title="pattern subtype", fontsize=8, title_fontsize=9)
     ax.grid(alpha=0.2)
     fig.tight_layout()
     fig.savefig(Path(save_dir) / "embedding_tsne_pattern_type.png")
     plt.close(fig)
+
+    # --- Alert-only plot ---
+    if alert_mask.any():
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sc = _scatter_by_subtype(
+            ax, alert_mask, Z, color_values, y_sub, cmap_name,
+            size=24, alpha=0.85, edge_color="black", lw=0.2,
+        )
+        if sc is not None:
+            cbar = plt.colorbar(sc, ax=ax, fraction=0.03, pad=0.02)
+            cbar.set_label("Pattern ID (mapped)")
+        ax.set_title("t-SNE of Alert Pattern Embeddings")
+        ax.set_xlabel("t-SNE 1")
+        ax.set_ylabel("t-SNE 2")
+        ax.legend(title="pattern subtype", fontsize=8, title_fontsize=9)
+        ax.grid(alpha=0.2)
+        fig.tight_layout()
+        fig.savefig(Path(save_dir) / "embedding_tsne_alert_only.png")
+        plt.close(fig)
+
+    # --- Normal-only plot ---
+    if normal_mask.any():
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sc = _scatter_by_subtype(
+            ax, normal_mask, Z, color_values, y_sub, cmap_name,
+            size=18, alpha=0.75, edge_color="none", lw=0,
+        )
+        if sc is not None:
+            cbar = plt.colorbar(sc, ax=ax, fraction=0.03, pad=0.02)
+            cbar.set_label("Pattern ID (mapped)")
+        ax.set_title("t-SNE of Normal Pattern Embeddings")
+        ax.set_xlabel("t-SNE 1")
+        ax.set_ylabel("t-SNE 2")
+        ax.legend(title="pattern subtype", fontsize=8, title_fontsize=9)
+        ax.grid(alpha=0.2)
+        fig.tight_layout()
+        fig.savefig(Path(save_dir) / "embedding_tsne_normal_only.png")
+        plt.close(fig)
 
 
 def generate_diagnostic_plots_for_final_state(
@@ -461,11 +541,13 @@ def generate_diagnostic_plots_for_final_state(
 
     pattern_id = diag["pattern_id"]
     pattern_type = diag["pattern_type"]
+    pattern_subtype = diag["pattern_subtype"]
 
     plot_embedding_tsne(
         embeddings,
         pattern_id=pattern_id,
         pattern_type=pattern_type,
+        pattern_subtype=pattern_subtype,
         save_dir=save_dir,
     )
     plot_embedding_row_heatmaps(
