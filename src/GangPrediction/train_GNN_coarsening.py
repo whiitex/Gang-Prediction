@@ -6,7 +6,8 @@ from tqdm import tqdm
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from src.GangPrediction.GNN_model import GCN, train_gnn_1_epoch, evaluate_model
+from src.GangPrediction.GNN_model import GCN
+from src.GangPrediction.training import train_gnn_1_epoch, evaluate_model
 from src.GangPrediction.gang_aware_subspace import get_gang_aware_basis
 from src.GangPrediction.experiment_utils import create_subspace
 from src.GangPrediction.coarsening_aware_loss import *

@@ -1,13 +1,18 @@
 """GNN model definition and training/evaluation helpers."""
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import Function
 from torch_geometric.nn import GCNConv, SAGEConv, GATConv, GraphConv, GINConv
 import torch.optim as optim
 from torch_geometric.data import Data
 from torch_geometric.nn import MessagePassing
+from torch_geometric.utils import to_scipy_sparse_matrix
 from sklearn.metrics import accuracy_score, roc_auc_score
+import numpy as np
+import scipy.sparse as sp
 
 from src.GangPrediction.pattern_models import Pattern
 from src.ml.metrics.metrics import average_precision_score
@@ -135,6 +140,240 @@ class DGCNConv(nn.Module):
         return self.nn(out)
 
 
+# ---------------------------------------------------------------------------
+# IGNN (Implicit Graph Neural Network) — Gu et al., NeurIPS 2020
+# ---------------------------------------------------------------------------
+
+
+def _projection_norm_inf(A, kappa=0.99):
+    """Project weight matrix so that each row's L1-norm <= kappa."""
+    A_np = A.clone().detach().cpu().numpy()
+    row_norms = np.abs(A_np).sum(axis=-1)
+    for idx in np.where(row_norms > kappa)[0]:
+        a_orig = A_np[idx, :]
+        a_sign = np.sign(a_orig)
+        a_abs = np.abs(a_orig)
+        a_sorted = np.sort(a_abs)
+
+        s = np.sum(a_sorted) - kappa
+        l = float(len(a_sorted))
+        for i in range(len(a_sorted)):
+            if s / l > a_sorted[i]:
+                s -= a_sorted[i]
+                l -= 1
+            else:
+                break
+        alpha = s / l
+        A_np[idx, :] = a_sign * np.maximum(a_abs - alpha, 0)
+    A.data.copy_(torch.tensor(A_np, dtype=A.dtype, device=A.device))
+    return A
+
+
+def _get_spectral_rad(adj_sparse, tol=1e-5):
+    """Compute spectral radius of a sparse adjacency (torch sparse or scipy)."""
+    if isinstance(adj_sparse, torch.Tensor):
+        adj_sparse = adj_sparse.coalesce().cpu()
+        A_scipy = sp.sparse.coo_matrix(
+            (np.abs(adj_sparse.values().numpy()), adj_sparse.indices().numpy()),
+            shape=adj_sparse.shape,
+        )
+    else:
+        A_scipy = adj_sparse
+    return (
+        float(np.abs(sp.sparse.linalg.eigs(A_scipy, k=1, return_eigenvectors=False)[0]))
+        + tol
+    )
+
+
+class _ImplicitFunction(Function):
+    """Custom autograd for the IGNN fixed-point iteration."""
+
+    @staticmethod
+    def forward(ctx, W, X_0, A, B, fw_mitr=300, bw_mitr=300):
+        X_0 = B if X_0 is None else X_0
+        X, err, status, D = _ImplicitFunction._fixed_point(
+            W, X_0, A, B, F.relu, mitr=fw_mitr, compute_dphi=True
+        )
+        ctx.save_for_backward(W, X, A, B, D, X_0, torch.tensor(bw_mitr))
+        if status != "converged":
+            pass  # silent — training may still progress
+        return X
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        W, X, A, B, D, X_0, bw_mitr = ctx.saved_tensors
+        bw_mitr = int(bw_mitr.cpu().numpy())
+        grad_x = grad_outputs[0]
+
+        dphi = lambda Z: torch.mul(Z, D)
+        grad_z, _, _, _ = _ImplicitFunction._fixed_point(
+            W.T, X_0, A, grad_x, dphi, mitr=bw_mitr, transposed_A=True
+        )
+
+        grad_W = grad_z @ torch.spmm(A, X.T)
+        grad_B = grad_z
+        return grad_W, None, torch.zeros_like(A), grad_B, None, None
+
+    @staticmethod
+    def _fixed_point(
+        W, X, A, B, phi, mitr=300, tol=3e-6, transposed_A=False, compute_dphi=False
+    ):
+        At = A if transposed_A else torch.transpose(A, 0, 1)
+        err = 0.0
+        status = "max itrs reached"
+        for _ in range(mitr):
+            X_ = W @ X
+            support = torch.spmm(At, X_.T).T
+            X_new = phi(support + B)
+            err = torch.norm(X_new - X, float("inf"))
+            if err < tol:
+                status = "converged"
+                break
+            X = X_new
+
+        dphi = None
+        if compute_dphi:
+            with torch.enable_grad():
+                support = torch.spmm(At, (W @ X).T).T
+                Z = support + B
+                Z.requires_grad_(True)
+                X_new = phi(Z)
+                dphi = torch.autograd.grad(torch.sum(X_new), Z, only_inputs=True)[0]
+
+        return X_new, err, status, dphi
+
+
+class ImplicitGraphLayer(nn.Module):
+    """Single IGNN implicit layer."""
+
+    def __init__(self, in_features, out_features, num_node, kappa=0.99):
+        super().__init__()
+        self.p = in_features
+        self.m = out_features
+        self.n = num_node
+        self.k = kappa
+
+        self.W = nn.Parameter(torch.FloatTensor(self.m, self.m))
+        self.Omega_1 = nn.Parameter(torch.FloatTensor(self.m, self.p))
+        self.bias = nn.Parameter(torch.FloatTensor(self.m, 1))
+        self._init_params()
+
+    def _init_params(self):
+        stdv = 1.0 / math.sqrt(self.W.size(1))
+        self.W.data.uniform_(-stdv, stdv)
+        self.Omega_1.data.uniform_(-stdv, stdv)
+        self.bias.data.uniform_(-stdv, stdv)
+
+    def forward(self, X_0, A, U, A_rho=1.0, fw_mitr=300, bw_mitr=300):
+        if self.k is not None and self.k > 0:
+            _projection_norm_inf(self.W, kappa=self.k / A_rho)
+        # B = Omega_1 @ U @ A^T  (input features projected through adjacency)
+        support_1 = torch.spmm(torch.transpose(U, 0, 1), self.Omega_1.T).T
+        support_1 = torch.spmm(torch.transpose(A, 0, 1), support_1.T).T
+        b_Omega = support_1
+        return _ImplicitFunction.apply(self.W, X_0, A, b_Omega, fw_mitr, bw_mitr)
+
+
+class IGNN(nn.Module):
+    """Implicit Graph Neural Network (Gu et al., NeurIPS 2020).
+
+    Integrates with the existing GNN_model.py interface: forward(x, edge_index, edge_weight=None).
+    Uses a fixed-point equilibrium equation to capture long-range dependencies.
+    """
+
+    def __init__(self, nfeat, nhid, nclass, num_node, dropout=0.5, kappa=0.9):
+        super().__init__()
+        self.dropout = dropout
+        self.nhid = nhid
+        self.num_node = num_node
+
+        self.ig1 = ImplicitGraphLayer(nfeat, nhid, num_node, kappa)
+        self.X_0 = nn.Parameter(torch.zeros(nhid, num_node), requires_grad=False)
+        self.V = nn.Linear(nhid, nclass, bias=False)
+
+        # Cached adjacency
+        self._adj_cache_id = None
+        self._adj_sparse = None
+        self._adj_rho = None
+
+    def _build_adj(self, edge_index, edge_weight, num_nodes):
+        """Build a normalised sparse adjacency from edge_index + optional weights."""
+        if edge_weight is None:
+            edge_weight = torch.ones(edge_index.size(1), device=edge_index.device)
+        adj_scipy = sp.sparse.coo_matrix(
+            (
+                edge_weight.detach().cpu().numpy(),
+                (edge_index[0].cpu().numpy(), edge_index[1].cpu().numpy()),
+            ),
+            shape=(num_nodes, num_nodes),
+        )
+        # Symmetric normalisation  D^{-1/2} A D^{-1/2}
+        rowsum = np.array(adj_scipy.sum(1)).flatten()
+        d_inv_sqrt = np.power(rowsum, -0.5)
+        d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.0
+        D_inv_sqrt = sp.sparse.diags(d_inv_sqrt)
+        adj_norm = D_inv_sqrt @ adj_scipy @ D_inv_sqrt
+        adj_norm = adj_norm.tocoo()
+
+        indices = torch.from_numpy(
+            np.vstack((adj_norm.row, adj_norm.col)).astype(np.int64)
+        )
+        values = torch.from_numpy(adj_norm.data.astype(np.float32))
+        adj_t = torch.sparse_coo_tensor(indices, values, torch.Size(adj_norm.shape))
+        return adj_t.to(edge_index.device)
+
+    def forward(self, x, edge_index, edge_weight=None):
+        num_nodes = x.size(0)
+
+        # Rebuild adjacency only when graph changes
+        cache_id = id(edge_index)
+        if self._adj_cache_id != cache_id:
+            self._adj_sparse = self._build_adj(edge_index, edge_weight, num_nodes)
+            self._adj_rho = _get_spectral_rad(self._adj_sparse)
+            self._adj_cache_id = cache_id
+
+            # Resize X_0 if graph size changed
+            if self.X_0.shape[1] != num_nodes:
+                self.X_0 = nn.Parameter(
+                    torch.zeros(self.nhid, num_nodes, device=x.device),
+                    requires_grad=False,
+                )
+
+        adj = self._adj_sparse
+        # U = features transposed: (p, n) — features are (n, p)
+        U = x.T.to_sparse() if not x.is_sparse else x.T
+
+        out = self.ig1(self.X_0, adj, U, self._adj_rho).T  # (n, nhid)
+        out = F.normalize(out, dim=-1)
+        out = F.dropout(out, self.dropout, training=self.training)
+        out = self.V(out)
+        return out
+
+    def get_embeddings(self, x, edge_index, edge_weight=None):
+        """Return intermediate node embeddings (pre-classifier)."""
+        num_nodes = x.size(0)
+        cache_id = id(edge_index)
+        if self._adj_cache_id != cache_id:
+            self._adj_sparse = self._build_adj(edge_index, edge_weight, num_nodes)
+            self._adj_rho = _get_spectral_rad(self._adj_sparse)
+            self._adj_cache_id = cache_id
+            if self.X_0.shape[1] != num_nodes:
+                self.X_0 = nn.Parameter(
+                    torch.zeros(self.nhid, num_nodes, device=x.device),
+                    requires_grad=False,
+                )
+
+        adj = self._adj_sparse
+        U = x.T.to_sparse() if not x.is_sparse else x.T
+        out = self.ig1(self.X_0, adj, U, self._adj_rho).T
+        return out
+
+    def reset_parameters(self):
+        self.ig1._init_params()
+        nn.init.zeros_(self.X_0)
+        self.V.reset_parameters()
+
+
 class GCN(nn.Module):
     def __init__(
         self,
@@ -145,17 +384,31 @@ class GCN(nn.Module):
         num_layers=4,
         use_edge_weights=False,
         GNN_type="GIN",
+        num_node=None,
+        kappa=0.9,
     ):
         super(GCN, self).__init__()
-        if num_layers < 2:
-            raise ValueError("num_layers must be at least 2")
         self.dropout = dropout
         self.num_layers = num_layers
         self.use_edge_weights = use_edge_weights
+        self._is_ignn = GNN_type == "IGNN"
 
-        self.convs = build_gnn_model(
-            nfeat, nhid, nclass, num_layers, use_edge_weights, GNN_type
-        )
+        if self._is_ignn:
+            # IGNN is a standalone model, not a stack of conv layers
+            self._ignn = IGNN(
+                nfeat,
+                nhid,
+                nclass,
+                num_node=num_node or 1,  # will auto-resize on first forward
+                dropout=dropout,
+                kappa=kappa,
+            )
+        else:
+            if num_layers < 2:
+                raise ValueError("num_layers must be at least 2")
+            self.convs = build_gnn_model(
+                nfeat, nhid, nclass, num_layers, use_edge_weights, GNN_type
+            )
 
     def _apply_conv(self, conv, x, edge_index, edge_weight=None):
         """Apply a conv layer while respecting layer-specific edge-weight support."""
@@ -168,6 +421,8 @@ class GCN(nn.Module):
 
     def forward(self, x, edge_index, edge_weight=None):
         """Compute logits for each node."""
+        if self._is_ignn:
+            return self._ignn(x, edge_index, edge_weight)
         for i, conv in enumerate(self.convs[:-1]):
             x = F.relu(self._apply_conv(conv, x, edge_index, edge_weight))
             x = F.dropout(x, self.dropout, training=self.training)
@@ -177,6 +432,8 @@ class GCN(nn.Module):
 
     def get_embeddings(self, x, edge_index, edge_weight=None):
         """Return intermediate node embeddings (pre-classifier)."""
+        if self._is_ignn:
+            return self._ignn.get_embeddings(x, edge_index, edge_weight)
         for conv in self.convs[:-2]:
             x = F.relu(self._apply_conv(conv, x, edge_index, edge_weight))
             # x = F.dropout(x, self.dropout, training=self.training)
@@ -184,257 +441,8 @@ class GCN(nn.Module):
         return x
 
     def reset_parameters(self):
+        if self._is_ignn:
+            self._ignn.reset_parameters()
+            return
         for conv in self.convs:
             conv.reset_parameters()
-
-
-def train_gnn_1_epoch(
-    model: nn.Module,
-    optimizer: optim.Optimizer,
-    criterion: nn.Module,
-    data: Data,
-    C_plus=None,
-    P=None,
-    L=None,
-    original_data=None,
-    coarse_loss: bool = False,
-    return_loss_components: bool = False,
-    # class_weights: torch.Tensor = None,
-):
-    """
-    Output:
-        - train_loss
-        - val_loss
-        - val_accuracy
-    """
-    # One training pass with optional coarse-to-fine projection.
-
-    # data = data.to(next(model.parameters()).device)
-
-    model.train()
-    optimizer.zero_grad()
-
-    # S_mp = data.S_mp if hasattr(data, "S_mp") else data.W
-    y = original_data.y if original_data is not None else data.y
-    train_idx = original_data.train_idx if original_data is not None else data.train_idx
-
-    logits = model(
-        data.x,
-        data.edge_index,
-        data.edge_weight if hasattr(data, "edge_weight") else None,
-    )
-    # if class_weights is not None:
-    # class_weights = class_weights.to(logits.device)
-    # logits = logits * class_weights.unsqueeze(0)
-    if C_plus is not None:
-        logits = C_plus @ logits
-        # pred_fine = F.log_softmax(C_plus @ logits, dim=1)
-    # else:
-    # pred_fine = F.log_softmax(logits, dim=1)
-    pred_fine = F.softmax(logits, dim=1)
-    # embeddings = model.get_embeddings(data.x, data.edge_index, data.edge_weight if hasattr(data, "edge_weight") else None)
-
-    # train
-    # embeddings = data.embeddings if hasattr(data, "embeddings") else None
-    if original_data is not None and coarse_loss:
-        embeddings = model.get_embeddings(
-            original_data.x,
-            original_data.edge_index,
-            original_data.edge_weight if hasattr(data, "edge_weight") else None,
-        )
-    else:
-        embeddings = None
-    # embeddings = F.normalize(embeddings, p=2, dim=1)
-    loss, loss_super_node, loss_cls = criterion(
-        logits, y, train_idx, embeddings, coarse_loss=coarse_loss, P=P, L=L
-    )
-    loss.backward()
-    optimizer.step()
-    train_acc = accuracy_score(
-        y[train_idx].detach().cpu().numpy(),
-        pred_fine[train_idx].max(1)[1].detach().cpu().numpy(),
-    )
-
-    if return_loss_components:
-        components = {
-            "loss_total": loss.item(),
-            "loss_cls": loss.item(),
-            "loss_supernode": 0.0,
-        }
-        if hasattr(criterion, "latest_loss_components"):
-            components.update(criterion.latest_loss_components)
-        return loss.item(), train_acc, components
-
-    return loss.item(), train_acc
-
-
-def evaluate_model(
-    model: nn.Module,
-    data: Data,
-    C=None,
-    C_plus=None,
-    original_data=None,
-    alert_patterns=None,
-    normal_patterns=None,
-    alert_thresholds=(0.75, 0.75),
-    normal_thresholds=(0.5, 0.5),
-    basis_rows=None,
-):
-    """Evaluate the model on test set."""
-
-    model.eval()
-    # data = data.to(next(model.parameters()).device)
-
-    alert_patterns = alert_patterns or []
-    normal_patterns = normal_patterns or []
-
-    with torch.no_grad():
-        logits = model(
-            data.x,
-            data.edge_index,
-            data.edge_weight if hasattr(data, "edge_weight") else None,
-        )
-        #
-        output = F.softmax(logits, dim=1)
-        # output = F.log_softmax(logits, dim=1)
-        # if C_plus is not None:
-        #     pred_test = C_plus @ output
-        # else:
-        #     pred_test = output
-        logit_test = logits[data.test_idx]
-        pred_test = output[data.test_idx].max(1)[1]
-        acc_test = accuracy_score(
-            data.y[data.test_idx].cpu().numpy(), pred_test.cpu().numpy()
-        )
-
-        # For binary classification with 2-class output, use positive class scores
-        logit_test_scores = (
-            logit_test[:, 1].cpu().numpy()
-            if logit_test.dim() > 1 and logit_test.shape[1] == 2
-            else logit_test.cpu().numpy()
-        )
-        precission = average_precision_score(
-            data.y[data.test_idx].cpu().numpy(),
-            logit_test_scores,
-            recall_span=(0.6, 1.0),
-        )
-
-    suspicious_probs = output[:, 1] if output.shape[1] > 1 else output.squeeze()
-    predictions_all = output.max(1)[1]
-
-    if C is None:
-        return {
-            "accuracy_test": acc_test,
-            "precision_test": precission,
-        }
-
-    # Project logits back to original graph size using C_plus
-    logits_fine = C_plus @ logits
-    pred_fine = torch.argmax(F.softmax(logits_fine, dim=1), dim=1)
-
-    accuracy_fine = torch.sum(
-        pred_fine[original_data.test_idx] == original_data.y[original_data.test_idx]
-    ).item() / len(original_data.test_idx)
-
-    # Use positive class PROBABILITIES (not logits) for precision calculation
-    # AP requires scores in [0,1] range for proper thresholding
-    probs_fine = F.softmax(logits_fine, dim=1)
-    prob_fine_scores = (
-        probs_fine[:, 1].cpu().numpy()
-        if probs_fine.dim() > 1 and probs_fine.shape[1] == 2
-        else probs_fine.cpu().numpy()
-    )
-    # Correct argument order: y_true first, y_scores second
-    precission_fine = average_precision_score(
-        original_data.y[original_data.test_idx].cpu().numpy(),
-        prob_fine_scores[original_data.test_idx.cpu().numpy()],
-        recall_span=(0.6, 1.0),
-    )
-
-    auc = roc_auc_score(
-        original_data.y[original_data.test_idx].cpu().numpy(),
-        prob_fine_scores[original_data.test_idx.cpu().numpy()],
-    )
-    ap = average_precision_score(
-        original_data.y[original_data.test_idx].cpu().numpy(),
-        prob_fine_scores[original_data.test_idx.cpu().numpy()],
-    )
-
-    results = {
-        # "predictions": predictions_all,
-        "suspicious_probs": suspicious_probs,
-        "n_pred_suspicious": (
-            int((predictions_all == 1).sum().item()) if output.shape[1] > 1 else 0
-        ),
-        "mean_prob": float(suspicious_probs.mean().item()),
-        "max_prob": float(suspicious_probs.max().item()),
-        "accuracy_fine": accuracy_fine,
-        "precision_fine": precission_fine,
-        "auc_fine": auc,
-        "ap_fine": ap,
-        "accuracy_test": acc_test,
-        "precision_test": precission,
-        "num_nodes_coarse": data.num_nodes,
-    }
-
-    node_to_supernode = get_node_to_supernode_mapping(C) if C is not None else None
-
-    _capture_pattern_lineage(
-        patterns=[*alert_patterns, *normal_patterns],
-        node_to_supernode=node_to_supernode,
-        pseudo_labels=probs_fine,
-    )
-
-    with torch.no_grad():
-        emb_source = original_data if original_data is not None else data
-        emb_rows = model.get_embeddings(
-            emb_source.x,
-            emb_source.edge_index,
-            emb_source.edge_weight if hasattr(emb_source, "edge_weight") else None,
-        )
-    diag = compute_embedding_and_basis_diagnostics(
-        emb_rows,
-        alert_patterns=alert_patterns,
-        normal_patterns=normal_patterns,
-        basis_rows=basis_rows,
-    )
-    results["embedding_diagnostics"] = {
-        "embedding": diag["embedding"],
-        "basis": diag["basis"],
-        "pattern_node_count": diag["pattern_node_count"],
-        "num_patterns": diag["num_patterns"],
-    }
-
-    alert_metrics = Pattern.average_metrics(
-        alert_patterns,
-        majority_threshold=alert_thresholds[0],
-        coarsening_threshold=alert_thresholds[1],
-    )
-    normal_metrics = Pattern.average_metrics(
-        normal_patterns,
-        majority_threshold=normal_thresholds[0],
-        coarsening_threshold=normal_thresholds[1],
-    )
-    results["alert_metrics"] = alert_metrics
-    results["normal_metrics"] = normal_metrics
-
-    alert_pattern_types = set(p.pattern_type for p in alert_patterns)
-    normal_pattern_types = set(p.pattern_type for p in normal_patterns)
-
-    for pattern_type in alert_pattern_types:
-        type_metrics = Pattern.average_metrics(
-            [p for p in alert_patterns if p.pattern_type == pattern_type],
-            majority_threshold=alert_thresholds[0],
-            coarsening_threshold=alert_thresholds[1],
-        )
-        results[f"alert_metrics_{pattern_type}"] = type_metrics
-
-    for pattern_type in normal_pattern_types:
-        type_metrics = Pattern.average_metrics(
-            [p for p in normal_patterns if p.pattern_type == pattern_type],
-            majority_threshold=normal_thresholds[0],
-            coarsening_threshold=normal_thresholds[1],
-        )
-        results[f"normal_metrics_{pattern_type}"] = type_metrics
-
-    return results

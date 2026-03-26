@@ -1,20 +1,20 @@
 import os
-import shutil
 import sys
+import shutil
+import warnings
 from pathlib import Path
-import torch
-import numpy as np
+
+warnings.filterwarnings("ignore")
 
 # Setup paths
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
 project_root = Path.cwd()
 sys.path.insert(0, str(project_root))
 
-import warnings
+import torch
+import numpy as np
 
-warnings.filterwarnings("ignore")
-
-from src.GangPrediction.GNN_model import evaluate_model
+from src.GangPrediction.training import evaluate_model
 from src.GangPrediction.train_GNN_coarsening import (
     train_GNN_coarsening_aware_loss,
     train_GNN,
