@@ -390,18 +390,18 @@ def plot_embedding_tsne(
     """
     # Marker map: each subtype gets a distinct shape
     SUBTYPE_MARKERS = {
-        "fan_out": "v",            # triangle down
-        "fan_in": "^",             # triangle up
-        "cycle": "o",              # circle
-        "bipartite": "s",          # square
-        "stack": "D",              # diamond
-        "random": "P",             # plus (filled)
-        "scatter_gather": "*",     # star
-        "gather_scatter": "X",     # x (filled)
-        "single": ".",             # point
-        "forward": ">",            # triangle right
-        "mutual": "<",             # triangle left
-        "periodical": "p",         # pentagon
+        "fan_out": "v",  # triangle down
+        "fan_in": "^",  # triangle up
+        "cycle": "o",  # circle
+        "bipartite": "s",  # square
+        "stack": "D",  # diamond
+        "random": "P",  # plus (filled)
+        "scatter_gather": "*",  # star
+        "gather_scatter": "X",  # x (filled)
+        "single": ".",  # point
+        "forward": ">",  # triangle right
+        "mutual": "<",  # triangle left
+        "periodical": "p",  # pentagon
     }
     DEFAULT_MARKER = "h"  # hexagon fallback
 
@@ -436,7 +436,9 @@ def plot_embedding_tsne(
     normal_mask = y_type == 0
     alert_mask = y_type == 1
 
-    def _scatter_by_subtype(ax, mask, Z, color_values, y_sub, cmap_name, size, alpha, edge_color, lw):
+    def _scatter_by_subtype(
+        ax, mask, Z, color_values, y_sub, cmap_name, size, alpha, edge_color, lw
+    ):
         """Plot each subtype with its own marker, return last scatter for colorbar."""
         subtypes_in_mask = np.unique(y_sub[mask])
         sc_ref = None
@@ -464,13 +466,29 @@ def plot_embedding_tsne(
     sc_ref = None
     if normal_mask.any():
         sc_ref = _scatter_by_subtype(
-            ax, normal_mask, Z, color_values, y_sub, cmap_name,
-            size=18, alpha=0.75, edge_color="none", lw=0,
+            ax,
+            normal_mask,
+            Z,
+            color_values,
+            y_sub,
+            cmap_name,
+            size=18,
+            alpha=0.75,
+            edge_color="none",
+            lw=0,
         )
     if alert_mask.any():
         sc_ref = _scatter_by_subtype(
-            ax, alert_mask, Z, color_values, y_sub, cmap_name,
-            size=24, alpha=0.85, edge_color="black", lw=0.2,
+            ax,
+            alert_mask,
+            Z,
+            color_values,
+            y_sub,
+            cmap_name,
+            size=24,
+            alpha=0.85,
+            edge_color="black",
+            lw=0.2,
         )
     if sc_ref is not None:
         cbar = plt.colorbar(sc_ref, ax=ax, fraction=0.03, pad=0.02)
@@ -488,8 +506,16 @@ def plot_embedding_tsne(
     if alert_mask.any():
         fig, ax = plt.subplots(figsize=(10, 8))
         sc = _scatter_by_subtype(
-            ax, alert_mask, Z, color_values, y_sub, cmap_name,
-            size=24, alpha=0.85, edge_color="black", lw=0.2,
+            ax,
+            alert_mask,
+            Z,
+            color_values,
+            y_sub,
+            cmap_name,
+            size=24,
+            alpha=0.85,
+            edge_color="black",
+            lw=0.2,
         )
         if sc is not None:
             cbar = plt.colorbar(sc, ax=ax, fraction=0.03, pad=0.02)
@@ -507,8 +533,16 @@ def plot_embedding_tsne(
     if normal_mask.any():
         fig, ax = plt.subplots(figsize=(10, 8))
         sc = _scatter_by_subtype(
-            ax, normal_mask, Z, color_values, y_sub, cmap_name,
-            size=18, alpha=0.75, edge_color="none", lw=0,
+            ax,
+            normal_mask,
+            Z,
+            color_values,
+            y_sub,
+            cmap_name,
+            size=18,
+            alpha=0.75,
+            edge_color="none",
+            lw=0,
         )
         if sc is not None:
             cbar = plt.colorbar(sc, ax=ax, fraction=0.03, pad=0.02)
