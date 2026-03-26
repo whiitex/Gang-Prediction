@@ -451,8 +451,6 @@ def create_subspace(alert_patterns, normal_patterns, num_nodes, device):
     for p in normal_patterns:
         idx = pattern_type_to_idx_normal[p.pattern_type]
         V_normal[p.nodes, idx] = 1.0
-    # Orthonormalize the bases using SVD
-    # U_alert, _, _ = torch.svd(V_alert)
-    # U_normal, _, _ = torch.svd(V_normal)
     U = torch.cat([V_alert, V_normal], dim=1)
     return U
+    # return V_alert

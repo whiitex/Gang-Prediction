@@ -1,14 +1,14 @@
-experiment: tutorial_demo12
+experiment: tutorial_demo13
 method: learning_vectors
-max_levels: 100
-max_epsilon: 5
+max_levels: 10
+max_epsilon: 2
 plot_gifs: false
 
 train_config:
   K: 100
-  nhid: 10
+  nhid: 8
   lr: 0.001
-  wd: 0.00001
+  wd: 0.000001
   dropout: 0.25
   initial_epochs: 3
   min_epochs: 1
@@ -17,12 +17,13 @@ train_config:
   loss_threshold: 0.002
   alpha: 1.0
   compression_method: svd
-  epsilon_schedule_power: 0.05
+  epsilon_schedule_power: 0.04
   GNN_type: DGCN
   num_layers: 4
   use_edge_weights: False
-  coarsening_weight: 10.0
+  coarsening_weight: 0.0
   use_labels_for_coarsening: False
+  use_super_node_loss: False
 
 
 alert_thresholds:

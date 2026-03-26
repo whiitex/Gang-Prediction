@@ -126,7 +126,6 @@ def run_experiment():
     # for threshold in THRESHOLDS:
     LOGGER.info(f"max_epsilon: {MAX_EPSILON:.4f}")
 
-    # Train coarsening-aware model
     Gall_train, _, model, _, results_history = train_GNN_coarsening_aware_loss(
         G,
         levels=MAX_LEVELS,
@@ -151,17 +150,28 @@ def run_experiment():
         f"coarse_acc={results_history[-1]['accuracy_test']:.4f}, fine_acc={results_history[-1]['accuracy_fine']:.4f}"
     )
 
+    EXPERIMENT_test = "tutorial_demo14"
+    experiment_root_test = project_root / "experiments" / EXPERIMENT_test
+    # Train coarsening-aware model
+    G_test, _, _, alert_test2, normal_test2 = load_and_preprocess_data(
+        data_dir=experiment_root_test / "config",
+        patterns_dir=experiment_root_test,
+        train_ratio=0,
+        to_undirected="variation" in METHOD.lower(),
+        device=device,
+    )
+
     Gall_test, _, _, _, results_history_test = train_GNN_coarsening_aware_loss(
-        G,
-        levels=10,
+        G_test,
+        levels=5,
         method=METHOD,
-        max_epsilon=5 * MAX_EPSILON,
+        max_epsilon=MAX_EPSILON,
         train=False,
         model=model,
         alert_thresholds=ALERT_THRESHOLDS,
         normal_thresholds=NORMAL_THRESHOLDS,
-        alert_patterns=alert_test,
-        normal_patterns=normal_test,
+        alert_patterns=alert_test2,
+        normal_patterns=normal_test2,
         epsilon_schedule_power=0.0,
         use_label_for_coarsening=PATTERN_SPLIT_CONFIG.get(
             "use_label_for_coarsening", False

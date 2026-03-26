@@ -103,6 +103,7 @@ def train_GNN_coarsening_aware_loss(
     num_layers=2,
     coarsening_weight=1.0,
     use_label_for_coarsening=False,
+    use_super_node_loss=False,
     **kwargs,
 ):
     """
@@ -145,7 +146,8 @@ def train_GNN_coarsening_aware_loss(
             class_weights=class_weights,
             alert_patterns=alert_train_patterns,
             normal_patterns=normal_train_patterns,
-            use_supernode_loss=(
+            use_supernode_loss=use_super_node_loss
+            and (
                 True if "learning" in method else False
             ),  # Enable supernode loss when learning B
             coarse_weight=coarsening_weight,
