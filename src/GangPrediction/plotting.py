@@ -67,6 +67,9 @@ def _to_series_dict(data: Dict | List[Dict]) -> Dict:
         "normal_gt_type_rates": [],
         "epochs_per_level": [],
         "epsilons": [],
+        "loss_total": [],
+        "loss_cls": [],
+        "loss_supernode": [],
     }
 
     for idx, level in enumerate(data, start=1):
@@ -177,6 +180,9 @@ def _to_series_dict(data: Dict | List[Dict]) -> Dict:
                 }
         out["alert_gt_type_rates"].append(alert_type_rates)
         out["normal_gt_type_rates"].append(normal_type_rates)
+        out["loss_total"].append(level.get("loss_total", np.nan))
+        out["loss_cls"].append(level.get("loss_cls", np.nan))
+        out["loss_supernode"].append(level.get("loss_supernode", np.nan))
 
     last_level = data[-1]
     out["epsilons"] = list(last_level.get("epsilons", []))
@@ -1110,6 +1116,64 @@ def plot_average_prf_filtered_unfiltered(
     plt.tight_layout()
     fig.savefig(save_path, bbox_inches="tight")
     return fig, ax
+
+
+def plot_training_loss_components(
+    data_list: List[Dict],
+    save_dir: str,
+    max_epsilon: float = None,
+    name_prefix: str = "",
+):
+    """Plot per-level training loss components when available."""
+    data = _to_series_dict(data_list)
+    x = np.asarray(data.get("x", []), dtype=float)
+    if x.size == 0:
+        return
+
+    has_total = _has_numeric_series(data, "loss_total")
+    has_cls = _has_numeric_series(data, "loss_cls")
+    has_super = _has_numeric_series(data, "loss_supernode")
+    if not (has_total or has_cls or has_super):
+        return
+
+    fig, ax = plt.subplots(figsize=(14, 8))
+
+    if has_total:
+        y_total = np.asarray(data.get("loss_total", []), dtype=float)
+        ax.plot(x, y_total, label="Total Loss", color="tab:blue", linewidth=2)
+
+    if has_cls:
+        y_cls = np.asarray(data.get("loss_cls", []), dtype=float)
+        ax.plot(x, y_cls, label="Classification Loss", color="tab:orange", linewidth=2)
+
+    if has_super:
+        y_super = np.asarray(data.get("loss_supernode", []), dtype=float)
+        ax.plot(
+            x,
+            y_super,
+            label="Supernode Loss",
+            color="tab:green",
+            linewidth=2,
+        )
+
+    title = "Training Loss Components per Coarsening Level"
+    if max_epsilon is not None:
+        title += f" (max_epsilon={max_epsilon:.4f})"
+
+    ax.set_title(title)
+    ax.set_xlabel("Coarsening Level")
+    ax.set_ylabel("Loss")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    save_dir_path = Path(save_dir)
+    save_dir_path.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        str(save_dir_path / f"training_loss_components{name_prefix}.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
 
 
 def plot_pattern_type_metrics_combined(

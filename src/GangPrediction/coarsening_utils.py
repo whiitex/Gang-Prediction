@@ -110,8 +110,8 @@ def coarse_one_level(
     algorithm="greedy",
     level=1,
     r_cur=None,
-    similarity_threshold=0.0,
     max_sigma=float("inf"),
+    use_label_for_coarsening=False,
 ):
     """Coarsen a single level using a variation-based or matching-based policy."""
 
@@ -144,7 +144,6 @@ def coarse_one_level(
             A=A,
             r=r_cur,
             mode=method,
-            similarity_threshold=similarity_threshold,
             max_sigma=max_sigma,
         )
     else:
@@ -153,8 +152,8 @@ def coarse_one_level(
             A=A,
             r=r_cur,
             algorithm=algorithm,
-            similarity_threshold=similarity_threshold,
             max_sigma=max_sigma,
+            use_label_for_coarsening=use_label_for_coarsening,
         )
 
     iC = get_coarsening_matrix(coarsening_list, G.num_nodes)
@@ -604,8 +603,8 @@ def contract_variation_edges(
     A=None,
     r=0.5,
     algorithm="greedy",
-    similarity_threshold=0.0,
     max_sigma=float("inf"),
+    use_label_for_coarsening=False,
 ):
     """
     Sequential contraction with local variation and edge-based families.
@@ -615,10 +614,7 @@ def contract_variation_edges(
 
     See contract_variation() for documentation.
     """
-    deg, M = (
-        G.dw,
-        G.num_edges,
-    )
+    deg = G.dw
 
     # Vectorized cost computation for all edges at once
     # Mathematical derivation: for 2-node subgraph with Pibot projection,
@@ -639,8 +635,8 @@ def contract_variation_edges(
     weights = 0.25 * (deg_sum**2) * (diff_norm_sq**2)
 
     # Enforce same-label constraint: set weight to infinity for edges connecting different labels
-    if hasattr(G, "y") and G.y is not None:
-        different_labels = G.y[src] != G.y[tgt]
+    if use_label_for_coarsening and hasattr(G, "y_pred") and G.y_pred is not None:
+        different_labels = G.y_pred[src] != G.y_pred[tgt]
         weights[different_labels] = float("inf")
 
     if algorithm == "optimal":
@@ -653,7 +649,6 @@ def contract_variation_edges(
             weights=weights,
             r=r,
             max_sigma=max_sigma,
-            similarity_threshold=similarity_threshold,
         )
 
     return coarsening_list, sigma_l, done_flag
@@ -665,7 +660,6 @@ def contract_variation_linear(
     A,
     r=0.5,
     mode="neighborhood",
-    similarity_threshold=0.0,
     max_sigma=float("inf"),
 ):
     """
@@ -788,7 +782,6 @@ def contract_variation_linear(
     coarsening_list = []
     # n, n_target = N, (1-r)*N
     n_reduce = np.floor(r * N)  # how many nodes do we need to reduce/eliminate?
-    X = G.embeddings if hasattr(G, "embeddings") else G.x
     max_sigma2 = max_sigma**2
     sigma_l_2 = 0.0
     count = 0
@@ -817,23 +810,15 @@ def contract_variation_linear(
             if n_gain > n_reduce:
                 continue  # this helps avoid over-reducing
 
-            if X is not None and len(i_set) > 1:
-                sim = similarity(X[i_set])
-            else:
-                sim = 1.0
-
             # print(f"{sim=}, {len(i_set)=}, {i_set=}, {X[i_set]=}")
 
             # probability based on similarity merging
-            if sim > similarity_threshold:
 
-                # all vertices are unmarked: add i_set to the coarsening list
-                marked[i_set] = True
-                coarsening_list.append(
-                    {"list": i_set, "similarity": sim, "cost": i_cset.cost}
-                )
-                # n -= len(i_set) - 1
-                n_reduce -= n_gain
+            # all vertices are unmarked: add i_set to the coarsening list
+            marked[i_set] = True
+            coarsening_list.append({"list": i_set, "cost": i_cset.cost})
+            # n -= len(i_set) - 1
+            n_reduce -= n_gain
 
             # if n <= n_target: break
             if n_reduce <= 0:
@@ -938,7 +923,6 @@ def matching_greedy(
     G: Data,
     weights,
     r=0.4,
-    similarity_threshold=0.0,
     max_sigma=float("inf"),
 ):
     """
@@ -971,12 +955,11 @@ def matching_greedy(
 
     done_flag = False
     N = G.num_nodes
-    X = G.embeddings if hasattr(G, "embeddings") else G.x
 
     # the edge set
-    edges = G.edge_index.clone()
+    edges = G.edge_index
 
-    idx = torch.argsort(weights)
+    idx = torch.argsort(weights, stable=False)
     edges = edges[:, idx]
     weights = weights[idx]
 
@@ -999,6 +982,9 @@ def matching_greedy(
     sigma_l_2 = 0  # cumulative cost sigma^2
     T = len(candidate_edges)
     while count <= T - 1:
+        if r is not None:
+            if n <= n_target:
+                break
         # pop a candidate edge
         [i, j] = candidate_edges[count]
         cost = weights[count]
@@ -1014,29 +1000,14 @@ def matching_greedy(
         if any(marked[[i, j]]):
             continue
 
-        # Check same-label constraint: only allow coarsening if nodes have the same label
-        if hasattr(G, "y") and G.y is not None:
-            if G.y[i] != G.y[j]:
-                continue
+        marked[[i, j]] = True
+        n -= 1
 
-        if X is not None:
-            sim = similarity(X[[i, j]])
-        else:
-            sim = 1.0
+        # add it to the matching
+        matching.append({"list": [i, j], "cost": cost})
 
-        if sim >= similarity_threshold:
-            marked[[i, j]] = True
-            n -= 1
-
-            # add it to the matching
-            # matching.append(torch.tensor([i, j]))
-            matching.append({"list": [i, j], "similarity": sim, "cost": cost})
-
-            sigma_l_2 += cost
+        sigma_l_2 += cost
         # termination condition
-        if r is not None:
-            if n <= n_target:
-                break
 
     sigma_l = sigma_l_2**0.5
     return matching, sigma_l, done_flag

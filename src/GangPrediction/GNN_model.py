@@ -27,6 +27,8 @@ def build_gnn_model(
     """Factory function to create a GNN model with the specified architecture."""
     if GNN_type == "GIN":
         return Build_GINConv(nfeat, nhid, nclass, num_layers, use_edge_weights)
+    elif GNN_type == "DGCN":
+        return Build_DGCN(nfeat, nhid, nclass, num_layers)
     elif GNN_type == "GCN":
         conv_layer = GCNConv
     elif GNN_type == "SAGE":
@@ -44,6 +46,14 @@ def build_gnn_model(
         convs.append(conv_layer(nhid, nhid))
     convs.append(conv_layer(nhid, nclass))  # Output layer
 
+    return convs
+
+
+def Build_DGCN(nfeat, nhid, nclass, num_layers):
+    """Factory function to create a DGCN model."""
+    convs = nn.ModuleList()
+    convs.append(DGCNConv(nfeat, nhid, num_layers=num_layers))  # First layer
+    convs.append(nn.Linear(nhid, nclass))  # Output layer
     return convs
 
 
@@ -108,6 +118,23 @@ class WeightedGINConv(MessagePassing):
         return edge_weight.view(-1, 1) * x_j
 
 
+class DGCNConv(nn.Module):
+    def __init__(self, n_in, n_out, num_layers=2):
+        super().__init__()
+        self.num_layers = num_layers
+        self.nn = nn.Linear(n_in, n_out)
+
+    def forward(self, x, edge_index, edge_weight=None):
+        abar = calc_abar(
+            edge_index,
+            edge_weight=edge_weight,
+            num_nodes=x.size(0),
+            num_layers=self.num_layers,
+        ).to(x.device)
+        out = torch.sparse.mm(abar, x) + x  # Adding self-loop contribution
+        return self.nn(out)
+
+
 class GCN(nn.Module):
     def __init__(
         self,
@@ -132,6 +159,8 @@ class GCN(nn.Module):
 
     def _apply_conv(self, conv, x, edge_index, edge_weight=None):
         """Apply a conv layer while respecting layer-specific edge-weight support."""
+        if isinstance(conv, nn.Linear):
+            return conv(x)
         supports_edge_weight = isinstance(conv, (GCNConv, GraphConv, WeightedGINConv))
         if self.use_edge_weights and edge_weight is not None and supports_edge_weight:
             return conv(x, edge_index, edge_weight)
@@ -169,7 +198,8 @@ def train_gnn_1_epoch(
     L=None,
     original_data=None,
     coarse_loss: bool = False,
-    class_weights: torch.Tensor = None,
+    return_loss_components: bool = False,
+    # class_weights: torch.Tensor = None,
 ):
     """
     Output:
@@ -193,9 +223,9 @@ def train_gnn_1_epoch(
         data.edge_index,
         data.edge_weight if hasattr(data, "edge_weight") else None,
     )
-    if class_weights is not None:
-        class_weights = class_weights.to(logits.device)
-        logits = logits * class_weights.unsqueeze(0)
+    # if class_weights is not None:
+    # class_weights = class_weights.to(logits.device)
+    # logits = logits * class_weights.unsqueeze(0)
     if C_plus is not None:
         logits = C_plus @ logits
         # pred_fine = F.log_softmax(C_plus @ logits, dim=1)
@@ -215,7 +245,7 @@ def train_gnn_1_epoch(
     else:
         embeddings = None
     # embeddings = F.normalize(embeddings, p=2, dim=1)
-    loss = criterion(
+    loss, loss_super_node, loss_cls = criterion(
         logits, y, train_idx, embeddings, coarse_loss=coarse_loss, P=P, L=L
     )
     loss.backward()
@@ -225,15 +255,15 @@ def train_gnn_1_epoch(
         pred_fine[train_idx].max(1)[1].detach().cpu().numpy(),
     )
 
-    # validate
-    # model.eval()
-    # with torch.no_grad():
-    #     output = model(data.x, data.edge_index)
-    #     # embeddings = model.get_embeddings(data.x, data.edge_index)
-
-    #     # loss_val = criterion(output, data.embeddings, data.y, val_idx)
-    #     # pred_val = output[val_idx].max(1)[1]
-    #     # acc_val = accuracy_score(data.y[val_idx].cpu().numpy(), pred_val.cpu().numpy())
+    if return_loss_components:
+        components = {
+            "loss_total": loss.item(),
+            "loss_cls": loss.item(),
+            "loss_supernode": 0.0,
+        }
+        if hasattr(criterion, "latest_loss_components"):
+            components.update(criterion.latest_loss_components)
+        return loss.item(), train_acc, components
 
     return loss.item(), train_acc
 

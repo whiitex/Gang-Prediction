@@ -70,12 +70,23 @@ class SupernodeEmbeddingLoss(nn.Module):
         for pattern in normal_patterns:
             normal_nodes.update(pattern.node_indices)
         total_pattern_nodes = torch.tensor(
-            list(alert_nodes.union(normal_nodes)), device=device, dtype=torch.long
+            sorted(alert_nodes.union(normal_nodes)),
+            device=device,
+            dtype=torch.long,
         )
-        loss = (
-            torch.sum((embeddings[total_pattern_nodes] - V[total_pattern_nodes]) ** 2)
-            / N
-        )
+        if total_pattern_nodes.numel() == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        logits = embeddings[total_pattern_nodes, :]
+        targets = V[total_pattern_nodes, :].argmax(dim=1)
+        loss = F.cross_entropy(logits, targets)
+        # loss = F.nll_loss(
+        #     F.log_softmax(embeddings[total_pattern_nodes, :], dim=1),
+        #     V[total_pattern_nodes, :].argmax(dim=1),
+        # )
+        # loss = torch.mean(
+        #     (embeddings[total_pattern_nodes] - V[total_pattern_nodes]) ** 2
+        # )
         return loss
 
     # def forward(
@@ -309,6 +320,13 @@ class CoarseningAwareLoss(nn.Module):
         self.alert_patterns = alert_patterns or {}
         self.normal_patterns = normal_patterns or {}
 
+        # Latest detached loss components for logging/plotting.
+        self.latest_loss_components = {
+            "loss_total": float("nan"),
+            "loss_cls": float("nan"),
+            "loss_supernode": float("nan"),
+        }
+
         # Precompute pattern node sets for efficiency
         self._precompute_pattern_info()
 
@@ -440,13 +458,17 @@ class CoarseningAwareLoss(nn.Module):
         loss_cls = self.class_loss(output[train_idx], labels[train_idx])
 
         if not coarse_loss or embeddings is None:
-            return loss_cls
+            self.latest_loss_components = {
+                "loss_total": float(loss_cls.detach().item()),
+                "loss_cls": float(loss_cls.detach().item()),
+                "loss_supernode": 0.0,
+            }
+            return loss_cls, 0, 0
 
         # 2. Pattern contrastive loss
         # loss_pattern = self._compute_pattern_contrastive_loss(embeddings)
 
         # 3. Supernode embedding loss (for learned B)
-        loss_supernode = torch.tensor(0.0, device=embeddings.device)
         if self.use_supernode_loss:
             loss_supernode = self.supernode_loss(
                 embeddings,
@@ -457,6 +479,8 @@ class CoarseningAwareLoss(nn.Module):
             #     embeddings.T @ L @ embeddings - torch.eye(embeddings.shape[1], device=P.device),
             #     p="fro",
             # )
+        else:
+            loss_supernode = torch.tensor(0.0, device=embeddings.device)
 
         if surrogate_epsilon:
             U = l_orthonormalize(embeddings, L)
@@ -465,10 +489,16 @@ class CoarseningAwareLoss(nn.Module):
         else:
             epsillon_loss = torch.tensor(0.0, device=embeddings.device)
 
-        return (
+        loss_total = (
             loss_cls
             # + 0 * loss_pattern
             + self.coarse_weight * loss_supernode
             + 1 * epsillon_loss
         )
+        self.latest_loss_components = {
+            "loss_total": float(loss_total.detach().item()),
+            "loss_cls": float(loss_cls.detach().item()),
+            "loss_supernode": float(loss_supernode.detach().item()),
+        }
+        return loss_total, loss_supernode, loss_cls
         # return loss_cls + self.coarse_weight * loss_pattern + loss_supernode

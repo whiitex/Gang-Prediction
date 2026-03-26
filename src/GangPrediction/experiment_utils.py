@@ -265,31 +265,35 @@ def load_amlgentex_data(
 
 
 def split_patterns(
-    patterns: dict,
+    patterns: List[Pattern],
     train_ratio: float = 0.7,
-    seed: int = 42,
+    seed: Optional[int] = None,
 ):
     """
     Split patterns into train and test sets.
 
     Args:
-        patterns: Dict mapping pattern_id -> list of node indices
-        pattern_types: Dict mapping pattern_id -> pattern type
-        train_ratio: Fraction of patterns to use for training
-        seed: Random seed for reproducibility
+        patterns: List of Pattern objects.
+        train_ratio: Fraction of patterns to use for training.
+        seed: Optional random seed for reproducibility.
 
     Returns:
-        train_patterns: Dict of training patterns
-        train_types: Dict of training pattern types
-        test_patterns: Dict of test patterns
-        test_types: Dict of test pattern types
+        train_patterns: Training patterns sorted by pattern type.
+        test_patterns: Test patterns sorted by pattern type.
     """
 
-    random.shuffle(patterns)
+    shuffled_patterns = list(patterns)
+    rng = random.Random(seed)
+    rng.shuffle(shuffled_patterns)
 
-    n_train = int(len(patterns) * train_ratio)
-    train_patterns = patterns[:n_train]
-    test_patterns = patterns[n_train:]
+    n_train = int(len(shuffled_patterns) * train_ratio)
+    train_patterns = shuffled_patterns[:n_train]
+    test_patterns = shuffled_patterns[n_train:]
+
+    # Keep split randomization while returning deterministic, type-grouped lists.
+    sort_key = lambda p: (str(p.pattern_type), str(p.pattern_id))
+    train_patterns = sorted(train_patterns, key=sort_key)
+    test_patterns = sorted(test_patterns, key=sort_key)
 
     return train_patterns, test_patterns
 
@@ -448,7 +452,7 @@ def create_subspace(alert_patterns, normal_patterns, num_nodes, device):
         idx = pattern_type_to_idx_normal[p.pattern_type]
         V_normal[p.nodes, idx] = 1.0
     # Orthonormalize the bases using SVD
-    U_alert, _, _ = torch.svd(V_alert)
-    U_normal, _, _ = torch.svd(V_normal)
-    U = torch.cat([U_alert, U_normal], dim=1)
+    # U_alert, _, _ = torch.svd(V_alert)
+    # U_normal, _, _ = torch.svd(V_normal)
+    U = torch.cat([V_alert, V_normal], dim=1)
     return U

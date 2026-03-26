@@ -14,7 +14,7 @@ REQUIRED_KEYS = (
     "method",
     "max_levels",
     # "epochs_per_level",
-    "threshold",
+    # "threshold",
     "max_epsilon",
     "plot_gifs",
     "train_config",

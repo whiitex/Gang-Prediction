@@ -344,3 +344,75 @@ def compute_class_weights(
     class_weights = class_weights * num_classes / class_weights.sum()
 
     return class_weights
+
+
+def create_adj(
+    edge_index,
+    edge_weight=None,
+    normalization="normal",
+    self_loop=False,
+    num_nodes=None,
+    nodes=None,
+):
+    if num_nodes is None:
+        num_nodes = max(torch.flatten(edge_index)) + 1
+    if nodes is None:
+        nodes = torch.arange(num_nodes, device=edge_index.device)
+    if self_loop:
+        undirected_edges = add_self_loops(edge_index)[0]
+    else:
+        undirected_edges = edge_index
+
+    edge_mask = undirected_edges[0].unsqueeze(1).eq(nodes).any(1)
+    directed_edges = undirected_edges[:, edge_mask]
+    # directed_edges, _ = remove_self_loops(directed_edges)
+
+    if edge_weight is not None:
+        edge_weight = edge_weight.to(edge_index.device)
+    else:
+        edge_weight = torch.ones(
+            directed_edges.size(1), dtype=torch.float32, device=edge_index.device
+        )
+    row, col = directed_edges[0], directed_edges[1]
+    deg = scatter(edge_weight, row, 0, dim_size=num_nodes, reduce="sum")
+
+    if normalization == "rw":
+        # Compute A_norm = -D^{-1} A.
+        deg_inv = 1.0 / deg
+        deg_inv = deg_inv.masked_fill_(deg_inv == float("inf"), 0)
+        edge_weight = deg_inv[row] * edge_weight
+    elif normalization == "sym":
+        # Compute A_norm = -D^{-1/2} A D^{-1/2}.
+        deg_inv_sqrt = deg.pow_(-0.5)
+        deg_inv_sqrt = deg_inv_sqrt.masked_fill_(deg_inv_sqrt == float("inf"), 0)
+        deg2 = scatter(edge_weight, col, 0, dim_size=num_nodes, reduce="sum")
+        deg_inv_sqrt2 = deg2.pow_(-0.5)
+        deg_inv_sqrt2 = deg_inv_sqrt2.masked_fill_(deg_inv_sqrt2 == float("inf"), 0)
+        edge_weight *= deg_inv_sqrt[edge_index[0]] * deg_inv_sqrt2[edge_index[1]]
+    adj = torch.sparse_coo_tensor(
+        directed_edges,
+        edge_weight,
+        (num_nodes, num_nodes),
+        dtype=torch.float32,
+        device=edge_index.device,
+    )
+
+    return adj
+
+
+def calc_abar(edge_index, num_nodes, num_layers, edge_weight=None):
+    adj = create_adj(
+        edge_index,
+        edge_weight=edge_weight,
+        normalization="rw",
+        self_loop=True,
+        num_nodes=num_nodes,
+        # nodes=self.graph.node_ids,
+    )
+    num_nodes = adj.shape[1]
+
+    abar = sparse_eye(num_nodes).to(device)  # Start with identity
+
+    for i in range(num_layers):
+        abar = torch.matmul(adj, abar)  # Sparse-dense matrix multiplication
+    return abar

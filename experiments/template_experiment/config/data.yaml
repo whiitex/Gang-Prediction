@@ -1,6 +1,6 @@
 general:
   simulation_name: template_experiment
-  random_seed: 0
+  random_seed: 10
   total_steps: 100
   base_date: '2023-01-01'
 input:

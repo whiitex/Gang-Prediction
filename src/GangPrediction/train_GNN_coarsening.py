@@ -79,7 +79,6 @@ def train_GNN_coarsening_aware_loss(
     wd=5e-4,
     method="variation_neighborhoods",
     algorithm: str = "greedy",
-    similarity_threshold=0.0,
     max_epsilon=float("inf"),
     K=50,
     nhid=128,
@@ -102,6 +101,8 @@ def train_GNN_coarsening_aware_loss(
     train=False,
     model=None,
     num_layers=2,
+    coarsening_weight=1.0,
+    use_label_for_coarsening=False,
     **kwargs,
 ):
     """
@@ -147,6 +148,7 @@ def train_GNN_coarsening_aware_loss(
             use_supernode_loss=(
                 True if "learning" in method else False
             ),  # Enable supernode loss when learning B
+            coarse_weight=coarsening_weight,
         )
 
         # train data
@@ -229,6 +231,9 @@ def train_GNN_coarsening_aware_loss(
         # ratio = np.log(level) / 5000 + 0.0001
         # if ratio > 0.0025:
         #     ratio = 0.0025
+        # if level <= 10:
+        #     ratio = 0
+        # else:
         ratio = 1
 
         # Get embeddings from the GNN in eval mode with no_grad
@@ -257,26 +262,33 @@ def train_GNN_coarsening_aware_loss(
                 V = calc_B_from_embeddings(G_embeddings)
                 # learned_basis_rows = V.detach()
                 B = torch.sparse.mm(C, V)  # Update B for the current coarsened graph
-
-        if train:
-            model.train()  # Switch back to train mode for the training step
-        embeddings = model.get_embeddings(Gc.x, Gc.edge_index, Gc.edge_weight)
-        Gc.embeddings = F.normalize(embeddings, p=2, dim=1).detach()
+                # B = 0 * B
+        # embeddings = model.get_embeddings(Gc.x, Gc.edge_index, Gc.edge_weight)
+        # Gc.embeddings = F.normalize(embeddings, p=2, dim=1).detach()
 
         # Polynomial epsilon schedule: slow increase early, faster increase later.
         level_progress = level / max(1, levels)
-        max_eps_in_level = max_epsilon * (level_progress**epsilon_schedule_power)
+        if (
+            np.abs(epsilon_schedule_power) < 1e-8
+        ):  # Effectively no scheduling, constant epsilon
+            max_eps_in_level = max_epsilon  # No scheduling, constant epsilon
+        else:
+            pow = level_progress**epsilon_schedule_power
+            max_eps_in_level = max_epsilon * pow
         max_sigma = max(0.0, (max_eps_in_level + 1) / (epsilon_l + 1) - 1)
+
+        Gc.pred = model(Gc.x, Gc.edge_index, Gc.edge_weight)
+        Gc.y_pred = Gc.pred.argmax(dim=1)
 
         Gc, B, sigma_l, done_flag = coarse_one_level(
             Gc,
             B=B,
             method=method,
             algorithm=algorithm,
-            similarity_threshold=similarity_threshold,
             level=level,
             r_cur=ratio,
             max_sigma=max_sigma,
+            use_label_for_coarsening=use_label_for_coarsening,
         )
         C = torch.sparse.mm(Gc.C, C)
         C_plus = torch.sparse.mm(C_plus, Gc.C_plus)
@@ -294,13 +306,22 @@ def train_GNN_coarsening_aware_loss(
         # break
         epsilons.append(epsilon_l)
 
+        level_loss_total = np.nan
+        level_loss_cls = np.nan
+        level_loss_supernode = np.nan
+
         if train:
             # Dynamic epoch scheduling: only train if at the right interval
             if level % epoch_interval == 0:
                 active_coarse_loss_epochs = max(0, current_epochs)
+                epoch_loss_components = {
+                    "loss_total": [],
+                    "loss_cls": [],
+                    "loss_supernode": [],
+                }
                 for epoch in range(current_epochs):
                     # train the GNN on the coarsened graph
-                    train_loss, train_acc = train_gnn_1_epoch(
+                    train_loss, train_acc, loss_components = train_gnn_1_epoch(
                         model,
                         optimizer=optimizer,
                         criterion=criterion,
@@ -310,7 +331,27 @@ def train_GNN_coarsening_aware_loss(
                         L=data.L,
                         original_data=original_data,
                         coarse_loss=epoch < active_coarse_loss_epochs,
-                        class_weights=class_weights,
+                        return_loss_components=True,
+                        # class_weights=class_weights,
+                    )
+
+                    epoch_loss_components["loss_total"].append(
+                        float(loss_components.get("loss_total", train_loss))
+                    )
+                    epoch_loss_components["loss_cls"].append(
+                        float(loss_components.get("loss_cls", train_loss))
+                    )
+                    epoch_loss_components["loss_supernode"].append(
+                        float(loss_components.get("loss_supernode", 0.0))
+                    )
+
+                if epoch_loss_components["loss_total"]:
+                    level_loss_total = float(
+                        np.mean(epoch_loss_components["loss_total"])
+                    )
+                    level_loss_cls = float(np.mean(epoch_loss_components["loss_cls"]))
+                    level_loss_supernode = float(
+                        np.mean(epoch_loss_components["loss_supernode"])
                     )
 
                 # Track loss for convergence detection
@@ -339,6 +380,8 @@ def train_GNN_coarsening_aware_loss(
                             epoch_interval = max(1, epoch_interval - 1)
                         elif current_epochs < initial_epochs:
                             current_epochs = min(initial_epochs, current_epochs + 1)
+
+                scheduler.step(train_loss)
             else:
                 # Skip training at this level, use last known values
                 train_loss = loss_history[-1] if loss_history else 0.0
@@ -363,6 +406,9 @@ def train_GNN_coarsening_aware_loss(
         )
         results["epsilons"] = epsilons
         results["epochs_per_level"] = epochs_per_level_history
+        results["loss_total"] = level_loss_total
+        results["loss_cls"] = level_loss_cls
+        results["loss_supernode"] = level_loss_supernode
         results_history.append(results)
         alert_rate = results["alert_metrics"].get("detection_rate", 0)
         normal_rate = results["normal_metrics"].get("detection_rate", 0)

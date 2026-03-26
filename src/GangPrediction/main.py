@@ -2,7 +2,8 @@ import os
 import shutil
 import sys
 from pathlib import Path
-
+import torch
+import numpy as np
 
 # Setup paths
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
@@ -22,7 +23,7 @@ from src.GangPrediction.experiment_utils import (
     create_subspace,
     load_and_preprocess_data,
 )
-from src.GangPrediction.plotting import plot_all_results
+from src.GangPrediction.plotting import plot_all_results, plot_training_loss_components
 from src.GangPrediction.embedding_diagnostics import (
     plot_diagnostic_trends,
     generate_diagnostic_plots_for_final_state,
@@ -46,7 +47,6 @@ CONFIG = load_main_config(CONFIG_PATH)
 EXPERIMENT = CONFIG["experiment"]
 METHOD = CONFIG["method"]
 MAX_LEVELS = int(CONFIG["max_levels"])  # Max coarsening levels
-THRESHOLD = float(CONFIG["threshold"])  # Coarsening threshold
 MAX_EPSILON = float(CONFIG["max_epsilon"])  # Max coarsening epsilon
 TRAIN_CONFIG = CONFIG["train_config"]
 ALERT_THRESHOLDS = CONFIG["alert_thresholds"]  # (majority, coarsening)
@@ -93,6 +93,29 @@ def run_experiment():
     acc_test = baseline_results["accuracy_test"]
     prec_baseline = baseline_results["precision_test"]
 
+    # Save baseline model
+    baseline_model_path = Path(save_path) / "models" / "baseline_model.pt"
+    baseline_model_path.parent.mkdir(exist_ok=True)
+    torch.save(model.state_dict(), str(baseline_model_path))
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "model_class": "GCN",
+            "model_kwargs": {
+                "nfeat": G.num_features,
+                "nhid": TRAIN_CONFIG.get("nhid", 128),
+                "nclass": len(np.unique(G.y.numpy())),
+                "dropout": TRAIN_CONFIG.get("dropout", 0.1),
+                "num_layers": TRAIN_CONFIG.get("num_layers", 2),
+                "GNN_type": TRAIN_CONFIG.get("GNN_type", "GAT"),
+                "use_edge_weights": TRAIN_CONFIG.get("use_edge_weights", False),
+            },
+            "results": baseline_results,
+        },
+        str(baseline_model_path.with_suffix(".pth")),
+    )
+    LOGGER.info(f"Baseline model saved to {baseline_model_path}")
+
     # Ground truth stats
     n_suspicious_gt = (G.y == 1).sum().item()
     LOGGER.info(
@@ -101,16 +124,13 @@ def run_experiment():
     )
 
     # for threshold in THRESHOLDS:
-    LOGGER.info(f"\nThreshold: {THRESHOLD*100:.0f}%")
     LOGGER.info(f"max_epsilon: {MAX_EPSILON:.4f}")
 
     # Train coarsening-aware model
     Gall_train, _, model, _, results_history = train_GNN_coarsening_aware_loss(
         G,
         levels=MAX_LEVELS,
-        # epoch_per_level=ep_per_lev,
         method=METHOD,
-        similarity_threshold=THRESHOLD,
         max_epsilon=MAX_EPSILON,
         train=True,
         # model=model,
@@ -130,6 +150,55 @@ def run_experiment():
         f"Final: nodes={Gall_train[-1].num_nodes}, edges={Gall_train[-1].num_edges}, "
         f"coarse_acc={results_history[-1]['accuracy_test']:.4f}, fine_acc={results_history[-1]['accuracy_fine']:.4f}"
     )
+
+    Gall_test, _, _, _, results_history_test = train_GNN_coarsening_aware_loss(
+        G,
+        levels=10,
+        method=METHOD,
+        max_epsilon=5 * MAX_EPSILON,
+        train=False,
+        model=model,
+        alert_thresholds=ALERT_THRESHOLDS,
+        normal_thresholds=NORMAL_THRESHOLDS,
+        alert_patterns=alert_test,
+        normal_patterns=normal_test,
+        epsilon_schedule_power=0.0,
+        use_label_for_coarsening=PATTERN_SPLIT_CONFIG.get(
+            "use_label_for_coarsening", False
+        ),
+    )
+
+    # Load saved results
+    LOGGER.info(
+        f"Final: nodes={Gall_test[-1].num_nodes}, edges={Gall_test[-1].num_edges}, "
+        f"coarse_acc={results_history_test[-1]['accuracy_test']:.4f}, fine_acc={results_history_test[-1]['accuracy_fine']:.4f}"
+    )
+
+    # Save coarsening-aware model
+    coarse_model_path = Path(save_path) / "models" / "coarsening_aware_model.pt"
+    coarse_model_path.parent.mkdir(exist_ok=True)
+    torch.save(model.state_dict(), str(coarse_model_path))
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "model_class": "GCN",
+            "model_kwargs": {
+                "nfeat": G.num_features,
+                "nhid": TRAIN_CONFIG.get("nhid", 128),
+                "nclass": len(np.unique(G.y.numpy())),
+                "dropout": TRAIN_CONFIG.get("dropout", 0.1),
+                "num_layers": TRAIN_CONFIG.get("num_layers", 2),
+                "GNN_type": TRAIN_CONFIG.get("GNN_type", "GAT"),
+                "use_edge_weights": TRAIN_CONFIG.get("use_edge_weights", False),
+            },
+            "method": METHOD,
+            "max_epsilon": MAX_EPSILON,
+            "results_history": results_history,
+            "results_history_test": results_history_test,
+        },
+        str(coarse_model_path.with_suffix(".pth")),
+    )
+    LOGGER.info(f"Coarsening-aware model saved to {coarse_model_path}")
 
     # all_data_inference.append(inference_data)
 
@@ -159,11 +228,36 @@ def run_experiment():
     coarse_results = evaluate_model(model_coarse, G_coarse)
     acc_coarse = coarse_results["accuracy_test"]
 
+    # Save coarse model
+    coarse_gnn_path = Path(save_path) / "models" / "coarse_gnn_model.pt"
+    coarse_gnn_path.parent.mkdir(exist_ok=True)
+    torch.save(model_coarse.state_dict(), str(coarse_gnn_path))
+    torch.save(
+        {
+            "model_state_dict": model_coarse.state_dict(),
+            "model_class": "GCN",
+            "model_kwargs": {
+                "nfeat": G_coarse.num_features,
+                "nhid": TRAIN_CONFIG.get("nhid", 128),
+                "nclass": len(np.unique(G_coarse.y.numpy())),
+                "dropout": TRAIN_CONFIG.get("dropout", 0.1),
+                "num_layers": TRAIN_CONFIG.get("num_layers", 2),
+                "GNN_type": TRAIN_CONFIG.get("GNN_type", "GAT"),
+                "use_edge_weights": TRAIN_CONFIG.get("use_edge_weights", False),
+            },
+            "results": coarse_results,
+        },
+        str(coarse_gnn_path.with_suffix(".pth")),
+    )
+    LOGGER.info(f"Coarse GNN model saved to {coarse_gnn_path}")
+
     # Generate all plots
+    train_path = f"{save_path}train_results/"
+    os.makedirs(train_path, exist_ok=True)
     plot_all_results(
         data_list=results_history,
         # threshold=THRESHOLD,
-        save_dir=str(save_path),
+        save_dir=str(train_path),
         # epochs_per_level=ep_per_lev,
         max_epsilon=MAX_EPSILON,
         baseline_accuracy=acc_test,
@@ -178,8 +272,34 @@ def run_experiment():
         normal_majority_th=NORMAL_THRESHOLDS[0],
         name_prefix="",
     )
+    plot_training_loss_components(
+        data_list=results_history,
+        save_dir=str(train_path),
+        max_epsilon=MAX_EPSILON,
+        name_prefix="",
+    )
+    test_path = f"{save_path}test_results/"
+    os.makedirs(test_path, exist_ok=True)
+    plot_all_results(
+        data_list=results_history_test,
+        # threshold=THRESHOLD,
+        save_dir=str(test_path),
+        # epochs_per_level=ep_per_lev,
+        max_epsilon=5 * MAX_EPSILON,
+        baseline_accuracy=acc_test,
+        baseline_precision=prec_baseline,
+        coarse_accuracy=acc_coarse,
+        has_alert_patterns=bool(alert_train),
+        has_normal_patterns=bool(normal_train),
+        smooth=False,
+        alert_coarse_th=ALERT_THRESHOLDS[1],
+        alert_majority_th=ALERT_THRESHOLDS[0],
+        normal_coarse_th=NORMAL_THRESHOLDS[1],
+        normal_majority_th=NORMAL_THRESHOLDS[0],
+        name_prefix="",
+    )
 
-    plot_diagnostic_trends(results_history=results_history, save_dir=str(save_path))
+    plot_diagnostic_trends(results_history=results_history, save_dir=str(train_path))
 
     model.eval()
     with torch.no_grad():
@@ -190,13 +310,11 @@ def run_experiment():
         )
         # N = G.num_nodes
         # final_embeddings = create_subspace(alert_test, normal_test, N, device)
-    learned_basis = getattr(model, "latest_learned_basis_rows", None)
     generate_diagnostic_plots_for_final_state(
         embeddings=final_embeddings,
-        alert_patterns=alert_test,
-        normal_patterns=normal_test,
-        save_dir=str(save_path),
-        basis_rows=learned_basis,
+        alert_patterns=alert_train,
+        normal_patterns=normal_train,
+        save_dir=str(train_path),
     )
 
     LOGGER.info(f"Plots saved to {save_path}")
