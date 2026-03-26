@@ -117,7 +117,7 @@ def coarse_one_level(
 
     done_flag = False
 
-    if level == 1:
+    if level == 0:
         A = B
     else:
         d, V = torch.linalg.eigh(B.T @ G.L @ B)

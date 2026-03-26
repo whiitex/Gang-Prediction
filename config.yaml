@@ -1,7 +1,9 @@
 experiment: tutorial_demo13
-method: learning_vectors
+method: variation_edges    # learning_vectors, learning_bases, variation_edges, variation_bases
+# method: learning_vectors    # learning_vectors, learning_bases, variation_edges, variation_bases
+remove_overlaps: False
 max_levels: 10
-max_epsilon: 2
+max_epsilon: 50
 plot_gifs: false
 
 train_config:
@@ -9,7 +11,7 @@ train_config:
   nhid: 8
   lr: 0.001
   wd: 0.000001
-  dropout: 0.25
+  dropout: 0.1
   initial_epochs: 3
   min_epochs: 1
   max_epoch_interval: 1
@@ -24,6 +26,7 @@ train_config:
   coarsening_weight: 0.0
   use_labels_for_coarsening: False
   use_super_node_loss: False
+
 
 
 alert_thresholds:

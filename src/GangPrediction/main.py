@@ -75,6 +75,7 @@ def run_experiment():
         patterns_dir=experiment_root,
         train_ratio=PATTERN_SPLIT_CONFIG.get("train_ratio", 0.5),
         to_undirected="variation" in METHOD.lower(),
+        remove_overlaps=CONFIG.get("remove_overlaps", True),
         device=device,
     )
 
@@ -158,6 +159,7 @@ def run_experiment():
         patterns_dir=experiment_root_test,
         train_ratio=0,
         to_undirected="variation" in METHOD.lower(),
+        remove_overlaps=CONFIG.get("remove_overlaps", True),
         device=device,
     )
 

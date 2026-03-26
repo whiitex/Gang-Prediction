@@ -21,6 +21,7 @@ REQUIRED_KEYS = (
     "alert_thresholds",
     "normal_thresholds",
     "pattern_split_config",
+    "remove_overlaps",
     # "epsilon_schedule_power",
 )
 

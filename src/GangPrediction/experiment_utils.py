@@ -91,6 +91,7 @@ def load_and_preprocess_data(
     patterns_dir: Path,
     train_ratio: float = 0.5,
     to_undirected: bool = True,
+    remove_overlaps: bool = True,
     device: Optional[torch.device] = "cpu",
 ) -> Tuple[torch_geometric.data.Data, List[Pattern], List[Pattern]]:
     """
@@ -114,27 +115,28 @@ def load_and_preprocess_data(
     alert_patterns, normal_patterns = load_all_patterns(patterns_dir, node_to_index)
 
     # Preprocess overlaps so each node belongs to at most one pattern.
-    # Alert patterns take priority over normal patterns for cross-class conflicts.
-    alert_patterns, normal_patterns, overlap_stats = (
-        preprocess_patterns_with_alert_priority(
-            alert_patterns,
-            normal_patterns,
-            labels=G.y,
+    if remove_overlaps:
+        # Alert patterns take priority over normal patterns for cross-class conflicts.
+        alert_patterns, normal_patterns, overlap_stats = (
+            preprocess_patterns_with_alert_priority(
+                alert_patterns,
+                normal_patterns,
+                labels=G.y,
+            )
         )
-    )
-    print("\nPattern overlap preprocessing summary:")
-    print(
-        f"  Alert patterns: {overlap_stats['alert_patterns_before']} -> {overlap_stats['alert_patterns_after']} "
-        f"(removed empty: {overlap_stats['removed_alert_patterns_empty']})"
-    )
-    print(
-        f"  Normal patterns: {overlap_stats['normal_patterns_before']} -> {overlap_stats['normal_patterns_after']} "
-        f"(removed empty: {overlap_stats['removed_normal_patterns_empty']})"
-    )
-    print(
-        f"  Assigned nodes: alert={overlap_stats['assigned_alert_nodes']}, "
-        f"normal={overlap_stats['assigned_normal_nodes']}, total={overlap_stats['assigned_total_nodes']}"
-    )
+        print("\nPattern overlap preprocessing summary:")
+        print(
+            f"  Alert patterns: {overlap_stats['alert_patterns_before']} -> {overlap_stats['alert_patterns_after']} "
+            f"(removed empty: {overlap_stats['removed_alert_patterns_empty']})"
+        )
+        print(
+            f"  Normal patterns: {overlap_stats['normal_patterns_before']} -> {overlap_stats['normal_patterns_after']} "
+            f"(removed empty: {overlap_stats['removed_normal_patterns_empty']})"
+        )
+        print(
+            f"  Assigned nodes: alert={overlap_stats['assigned_alert_nodes']}, "
+            f"normal={overlap_stats['assigned_normal_nodes']}, total={overlap_stats['assigned_total_nodes']}"
+        )
 
     # Split patterns into train and test sets
     print("\n" + "=" * 60)
