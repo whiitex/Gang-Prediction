@@ -2118,3 +2118,93 @@ def plot_all_results(
             str(save_dir / f"normal_auc_comparison{name_prefix}.png"),
             pattern_type="normal",
         )
+
+
+def plot_detection_rate_vs_threshold(
+    alert_patterns,
+    normal_patterns,
+    save_dir: str,
+    step: float = 0.05,
+) -> None:
+    """Plot detection rate as a function of threshold for alert and normal patterns.
+
+    For each threshold in [0, 1) with the given step, a pattern is "detected"
+    when both its recall > threshold AND precision > threshold.
+    The detection rate is the fraction of detected patterns.
+
+    Produces two sub-plots side by side:
+    - Alert detection rate vs threshold (majority & coarsening metrics)
+    - Normal detection rate vs threshold (majority & coarsening metrics)
+    """
+    thresholds = np.arange(0.0, 1.0, step)
+
+    def _sweep(patterns, recall_key, precision_key):
+        rates = []
+        if not patterns:
+            return np.zeros_like(thresholds)
+        total = len(patterns)
+        for th in thresholds:
+            detected = sum(
+                1
+                for p in patterns
+                if p.metrics.values.get(recall_key, 0.0) > th
+                and p.metrics.values.get(precision_key, 0.0) > th
+            )
+            rates.append(detected / total)
+        return np.array(rates)
+
+    alert_majority = _sweep(alert_patterns, "recall", "precision")
+    alert_coarsening = _sweep(alert_patterns, "recall_filtered", "precision_filtered")
+    normal_majority = _sweep(normal_patterns, "recall", "precision")
+    normal_coarsening = _sweep(normal_patterns, "recall_filtered", "precision_filtered")
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+
+    # Alert subplot
+    ax1.plot(
+        thresholds,
+        alert_majority,
+        "o-",
+        color="tab:red",
+        label="majority (recall & precision)",
+    )
+    ax1.plot(
+        thresholds,
+        alert_coarsening,
+        "s--",
+        color="tab:orange",
+        label="coarsening (filtered)",
+    )
+    ax1.set_xlabel("Threshold")
+    ax1.set_ylabel("Detection Rate")
+    ax1.set_title("Alert Detection Rate vs Threshold")
+    ax1.set_xlim(0, 1)
+    ax1.set_ylim(-0.02, 1.02)
+    ax1.legend(fontsize=8)
+    ax1.grid(alpha=0.25)
+
+    # Normal subplot
+    ax2.plot(
+        thresholds,
+        normal_majority,
+        "o-",
+        color="tab:blue",
+        label="majority (recall & precision)",
+    )
+    ax2.plot(
+        thresholds,
+        normal_coarsening,
+        "s--",
+        color="tab:cyan",
+        label="coarsening (filtered)",
+    )
+    ax2.set_xlabel("Threshold")
+    ax2.set_title("Normal Detection Rate vs Threshold")
+    ax2.set_xlim(0, 1)
+    ax2.set_ylim(-0.02, 1.02)
+    ax2.legend(fontsize=8)
+    ax2.grid(alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(Path(save_dir) / "detection_rate_vs_threshold.png", dpi=150)
+    plt.close(fig)

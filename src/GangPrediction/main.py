@@ -23,7 +23,11 @@ from src.GangPrediction.experiment_utils import (
     create_subspace,
     load_and_preprocess_data,
 )
-from src.GangPrediction.plotting import plot_all_results, plot_training_loss_components
+from src.GangPrediction.plotting import (
+    plot_all_results,
+    plot_training_loss_components,
+    plot_detection_rate_vs_threshold,
+)
 from src.GangPrediction.embedding_diagnostics import (
     plot_diagnostic_trends,
     generate_diagnostic_plots_for_final_state,
@@ -326,6 +330,12 @@ def run_experiment():
         embeddings=final_embeddings,
         alert_patterns=alert_train,
         normal_patterns=normal_train,
+        save_dir=str(train_path),
+    )
+
+    plot_detection_rate_vs_threshold(
+        alert_patterns=alert_test,
+        normal_patterns=normal_test,
         save_dir=str(train_path),
     )
 
