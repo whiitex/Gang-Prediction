@@ -93,7 +93,15 @@ def run_experiment():
     print("\n" + "=" * 60)
     print("Training Baseline GNN Model")
     print("=" * 60)
-    model = train_GNN(G, epochs=100, **TRAIN_CONFIG)
+    model = train_GNN(
+        G,
+        epochs=100,
+        lr=0.005,
+        nhid=32,
+        use_class_weights=True,
+        num_layers=3,
+        GNN_type="SAGE",
+    )
     baseline_results = evaluate_model(model, G)
     acc_test = baseline_results["accuracy_test"]
     prec_baseline = baseline_results["precision_test"]
@@ -105,14 +113,14 @@ def run_experiment():
     torch.save(
         {
             "model_state_dict": model.state_dict(),
-            "model_class": "GCN",
+            "model_class": "SAGE",
             "model_kwargs": {
                 "nfeat": G.num_features,
                 "nhid": TRAIN_CONFIG.get("nhid", 128),
                 "nclass": len(np.unique(G.y.numpy())),
                 "dropout": TRAIN_CONFIG.get("dropout", 0.1),
                 "num_layers": TRAIN_CONFIG.get("num_layers", 2),
-                "GNN_type": TRAIN_CONFIG.get("GNN_type", "GAT"),
+                "GNN_type": TRAIN_CONFIG.get("GNN_type", "SAGE"),
                 "use_edge_weights": TRAIN_CONFIG.get("use_edge_weights", False),
             },
             "results": baseline_results,
