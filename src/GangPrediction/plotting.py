@@ -2208,3 +2208,67 @@ def plot_detection_rate_vs_threshold(
     fig.tight_layout()
     fig.savefig(Path(save_dir) / "detection_rate_vs_threshold.png", dpi=150)
     plt.close(fig)
+
+
+def plot_detection_auc_vs_level(
+    results_history: List[Dict],
+    save_dir: str,
+    name_prefix: str = "",
+) -> None:
+    """Plot detection-rate threshold-sweep AUC across coarsening levels.
+
+    AUC is computed per level from detection-rate vs threshold curves and
+    normalized to [0, 1] in evaluation.
+    """
+    if not results_history:
+        return
+
+    x = np.arange(1, len(results_history) + 1)
+
+    def _collect(key: str) -> np.ndarray:
+        vals = []
+        for level in results_history:
+            auc_dict = level.get("detection_auc", {})
+            cur = auc_dict.get(key)
+            vals.append(np.nan if cur is None else float(cur))
+        return np.array(vals, dtype=float)
+
+    alert_majority = _collect("alert_majority")
+    alert_coarsening = _collect("alert_coarsening")
+    normal_majority = _collect("normal_majority")
+    normal_coarsening = _collect("normal_coarsening")
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+
+    ax1.plot(x, alert_majority, "o-", color="tab:red", label="majority AUC")
+    ax1.plot(
+        x,
+        alert_coarsening,
+        "s--",
+        color="tab:orange",
+        label="coarsening AUC",
+    )
+    ax1.set_xlabel("Coarsening level")
+    ax1.set_ylabel("AUC (Detection Rate vs Threshold)")
+    ax1.set_title("Alert Detection AUC Across Levels")
+    ax1.set_ylim(-0.02, 1.02)
+    ax1.grid(alpha=0.25)
+    ax1.legend(fontsize=8)
+
+    ax2.plot(x, normal_majority, "o-", color="tab:blue", label="majority AUC")
+    ax2.plot(
+        x,
+        normal_coarsening,
+        "s--",
+        color="tab:cyan",
+        label="coarsening AUC",
+    )
+    ax2.set_xlabel("Coarsening level")
+    ax2.set_title("Normal Detection AUC Across Levels")
+    ax2.set_ylim(-0.02, 1.02)
+    ax2.grid(alpha=0.25)
+    ax2.legend(fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(Path(save_dir) / f"detection_auc_vs_level{name_prefix}.png", dpi=150)
+    plt.close(fig)

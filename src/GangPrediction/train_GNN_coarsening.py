@@ -415,10 +415,13 @@ def train_GNN_coarsening_aware_loss(
         results_history.append(results)
         alert_rate = results["alert_metrics"].get("detection_rate", 0)
         normal_rate = results["normal_metrics"].get("detection_rate", 0)
+        alert_auc = results.get("detection_auc", {}).get("alert_majority", 0)
+        normal_auc = results.get("detection_auc", {}).get("normal_majority", 0)
 
         bar.set_postfix_str(
-            f"ep={current_epochs}, {epsilon_l:.6f}/{max_epsilon:0.3f}, ratio={ratio:.6f}, nodes: {Gc.num_nodes} | "
+            f"eps: {epsilon_l:.5f}/{max_epsilon:0.3f}, n: {Gc.num_nodes} | "
             f"alert_rate: {alert_rate:.4f}, normal_rate: {normal_rate:.4f} | "
+            f"alert_auc: {alert_auc:.4f}, normal_auc: {normal_auc:.4f} | "
             f"prec: {results.get('precision_fine', 0):.4f}, coarse: {results.get('accuracy_test', 0):.4f}, fine: {results.get('accuracy_fine', 0):.4f} | "
         )
         bar.update(1)

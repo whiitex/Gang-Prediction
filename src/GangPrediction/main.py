@@ -27,6 +27,7 @@ from src.GangPrediction.plotting import (
     plot_all_results,
     plot_training_loss_components,
     plot_detection_rate_vs_threshold,
+    plot_detection_auc_vs_level,
 )
 from src.GangPrediction.embedding_diagnostics import (
     plot_diagnostic_trends,
@@ -302,6 +303,11 @@ def run_experiment():
         max_epsilon=MAX_EPSILON,
         name_prefix="",
     )
+    plot_detection_auc_vs_level(
+        results_history=results_history,
+        save_dir=str(train_path),
+        name_prefix="",
+    )
     test_path = f"{save_path}test_results/"
     os.makedirs(test_path, exist_ok=True)
     plot_all_results(
@@ -320,6 +326,11 @@ def run_experiment():
         alert_majority_th=ALERT_THRESHOLDS[0],
         normal_coarse_th=NORMAL_THRESHOLDS[1],
         normal_majority_th=NORMAL_THRESHOLDS[0],
+        name_prefix="",
+    )
+    plot_detection_auc_vs_level(
+        results_history=results_history_test,
+        save_dir=str(test_path),
         name_prefix="",
     )
 

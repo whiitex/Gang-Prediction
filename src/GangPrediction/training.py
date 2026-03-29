@@ -1,5 +1,7 @@
 """GNN model definition and training/evaluation helpers."""
 
+from typing import Dict
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -112,6 +114,48 @@ def evaluate_model(
     basis_rows=None,
 ):
     """Evaluate the model on test set."""
+
+    def _detection_curve_and_auc(
+        patterns,
+        thresholds: np.ndarray,
+        recall_key: str,
+        precision_key: str,
+    ) -> Dict[str, object]:
+        if not patterns:
+            zero_rates = np.zeros_like(thresholds, dtype=float)
+            return {
+                "thresholds": thresholds.tolist(),
+                "rates": zero_rates.tolist(),
+                "auc": 0.0,
+                "auc_raw": 0.0,
+            }
+
+        total = len(patterns)
+        rates = []
+        for th in thresholds:
+            detected = sum(
+                1
+                for p in patterns
+                if p.metrics.values.get(recall_key, 0.0) > th
+                and p.metrics.values.get(precision_key, 0.0) > th
+            )
+            rates.append(detected / total)
+        rates = np.asarray(rates, dtype=float)
+
+        if thresholds.size > 1:
+            auc_raw = float(np.trapz(rates, thresholds))
+            span = float(thresholds[-1] - thresholds[0])
+            auc_norm = float(auc_raw / span) if span > 0 else 0.0
+        else:
+            auc_raw = 0.0
+            auc_norm = 0.0
+
+        return {
+            "thresholds": thresholds.tolist(),
+            "rates": rates.tolist(),
+            "auc": auc_norm,
+            "auc_raw": auc_raw,
+        }
 
     model.eval()
     # data = data.to(next(model.parameters()).device)
@@ -248,6 +292,38 @@ def evaluate_model(
     )
     results["alert_metrics"] = alert_metrics
     results["normal_metrics"] = normal_metrics
+
+    thresholds = np.arange(0.0, 1.0, 0.05, dtype=float)
+    alert_curve_majority = _detection_curve_and_auc(
+        alert_patterns, thresholds, "recall", "precision"
+    )
+    alert_curve_coarsening = _detection_curve_and_auc(
+        alert_patterns, thresholds, "recall_filtered", "precision_filtered"
+    )
+    normal_curve_majority = _detection_curve_and_auc(
+        normal_patterns, thresholds, "recall", "precision"
+    )
+    normal_curve_coarsening = _detection_curve_and_auc(
+        normal_patterns, thresholds, "recall_filtered", "precision_filtered"
+    )
+
+    results["detection_curve"] = {
+        "thresholds": thresholds.tolist(),
+        "alert": {
+            "majority": alert_curve_majority,
+            "coarsening": alert_curve_coarsening,
+        },
+        "normal": {
+            "majority": normal_curve_majority,
+            "coarsening": normal_curve_coarsening,
+        },
+    }
+    results["detection_auc"] = {
+        "alert_majority": alert_curve_majority["auc"],
+        "alert_coarsening": alert_curve_coarsening["auc"],
+        "normal_majority": normal_curve_majority["auc"],
+        "normal_coarsening": normal_curve_coarsening["auc"],
+    }
 
     alert_pattern_types = set(p.pattern_type for p in alert_patterns)
     normal_pattern_types = set(p.pattern_type for p in normal_patterns)
