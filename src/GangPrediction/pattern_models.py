@@ -5,7 +5,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Type
 
 import numpy as np
 import torch
-from sklearn.metrics import precision_recall_curve, roc_auc_score, auc
+# from sklearn.metrics import precision_recall_curve, roc_auc_score, auc
 
 from src.GangPrediction.utils.utils import *
 

@@ -63,7 +63,7 @@ def load_patterns_from_file(
     for pattern_id, node_indices in pattern_dicts.items():
         pattern = create_pattern(
             pattern_id=pattern_id,
-            nodes=node_indices,
+            nodes=np.unique(node_indices),
             pattern_type=pattern_types.get(pattern_id, "unknown"),
             label=label,
         )
