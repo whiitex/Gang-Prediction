@@ -1,6 +1,5 @@
 experiment: tutorial_demo13
-method: variation_edges    # learning_vectors, learning_bases, variation_edges, variation_bases
-# method: learning_vectors    # learning_vectors, learning_bases, variation_edges, variation_bases
+method: variation_edges    # learning_vectors, learning_bases, variation_edges, variation_bases, variation_neighborhood, variation_star
 remove_overlaps: False
 max_levels: 10
 max_epsilon: 50

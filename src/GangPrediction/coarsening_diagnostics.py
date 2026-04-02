@@ -244,7 +244,7 @@ def _plot_multilevel_merge_metric_trajectories(
     )
     plt.savefig(path, dpi=120, bbox_inches="tight")
     plt.close()
-    LOGGER.info(f"  saved → {path}")
+    # LOGGER.info(f"  saved → {path}")
 
 
 def _plot_multilevel_merge_count_trajectories(
@@ -281,7 +281,7 @@ def _plot_multilevel_merge_count_trajectories(
     path = os.path.join(save_dir, f"{name_prefix}merge_count_vs_K_multilevel.png")
     plt.savefig(path, dpi=120, bbox_inches="tight")
     plt.close()
-    LOGGER.info(f"  saved → {path}")
+    # LOGGER.info(f"  saved → {path}")
 
 
 def compute_spectral_decomp(G: Data, K_max: int = 300) -> Tuple[np.ndarray, np.ndarray]:
@@ -514,7 +514,7 @@ def spectral_fingerprint(
     path = os.path.join(save_dir, f"{name_prefix}spectral_fingerprint_heatmap.png")
     plt.savefig(path, dpi=120)
     plt.close()
-    LOGGER.info(f"  saved → {path}")
+    # LOGGER.info(f"  saved → {path}")
 
     # ── Plot B: cumulative energy vs K ───────────────────────────────────
     alert_energy = energy[: len(alerts)].mean(axis=0) if alerts else None
@@ -557,7 +557,7 @@ def spectral_fingerprint(
     path = os.path.join(save_dir, f"{name_prefix}spectral_fingerprint_cumulative.png")
     plt.savefig(path, dpi=120)
     plt.close()
-    LOGGER.info(f"  saved → {path}")
+    # LOGGER.info(f"  saved → {path}")
 
     # Summary stat
     k50_alert = (
@@ -818,7 +818,7 @@ def plot_epsilon_schedules(
     path = os.path.join(save_dir, f"{name_prefix}epsilon_schedule_curves.png")
     plt.savefig(path, dpi=120, bbox_inches="tight")
     plt.close()
-    LOGGER.info(f"  saved → {path}")
+    # LOGGER.info(f"  saved → {path}")
 
     # Tabular summary
     LOGGER.info(f"  {'power':>8}  {'unlock level':>13}  {'% budget at level 1':>20}")
@@ -948,7 +948,7 @@ def epsilon_schedule_ablation(
     path = os.path.join(save_dir, f"{name_prefix}schedule_ablation_node_count.png")
     plt.savefig(path, dpi=120)
     plt.close()
-    LOGGER.info(f"  saved → {path}")
+    # LOGGER.info(f"  saved → {path}")
 
     # ── Plot: merge recall and precision ─────────────────────────────────
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -993,7 +993,7 @@ def epsilon_schedule_ablation(
     )
     plt.savefig(path, dpi=120)
     plt.close()
-    LOGGER.info(f"  saved → {path}")
+    # LOGGER.info(f"  saved → {path}")
 
     # ── Plot: pattern collapse rate ──────────────────────────────────────
     fig, ax = plt.subplots(figsize=(8, 4))
@@ -1020,7 +1020,7 @@ def epsilon_schedule_ablation(
     )
     plt.savefig(path, dpi=120)
     plt.close()
-    LOGGER.info(f"  saved → {path}")
+    # LOGGER.info(f"  saved → {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -1135,7 +1135,7 @@ def supernode_entropy_analysis(
     path = os.path.join(save_dir, f"{name_prefix}entropy_mean_per_level.png")
     plt.savefig(path, dpi=120)
     plt.close()
-    LOGGER.info(f"  saved → {path}")
+    # LOGGER.info(f"  saved → {path}")
 
     # ── Plot: pure fraction ────────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(8, 4))
@@ -1151,4 +1151,4 @@ def supernode_entropy_analysis(
     path = os.path.join(save_dir, f"{name_prefix}entropy_pure_fraction_per_level.png")
     plt.savefig(path, dpi=120)
     plt.close()
-    LOGGER.info(f"  saved → {path}")
+    # LOGGER.info(f"  saved → {path}")

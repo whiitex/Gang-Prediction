@@ -6,9 +6,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from torch_geometric.data import Data
-from torch_geometric.utils import k_hop_subgraph
 from torch_sparse import SparseTensor
-from sortedcontainers import SortedList
 from tqdm import tqdm
 
 from src.GangPrediction.maxWeightMatching import maxWeightMatching
@@ -27,7 +25,6 @@ def coarsen(
     Uk=None,
     lk=None,
     max_level_r=0.99,
-    similarity_threshold=0.0,
     max_epsilon=float("inf"),
 ):
     """
@@ -76,18 +73,17 @@ def coarsen(
     for level in range(1, max_levels + 1):
         # max_eps_in_level += max_epsilon / max_levels
         max_sigma = (max_epsilon + 1) / (epsilon_l + 1) - 1
-        Gc, B, sigma_l = coarse_one_level(
+        Gc, B, sigma_l, done_flag = coarse_one_level(
             Gc,
             B,
-            K=K,
             method=method,
             algorithm=algorithm,
-            similarity_threshold=similarity_threshold,
             level=level,
             r_cur=r,
             max_sigma=max_sigma,
         )
 
+        iC = Gc.C
         C = torch.sparse.mm(iC, C)
         Call.append(iC)
         Gall.append(Gc)
@@ -106,7 +102,7 @@ def coarsen(
 def coarse_one_level(
     G,
     B,
-    method="variation_neighborhoods",
+    method="variation_neighborhood",
     algorithm="greedy",
     level=1,
     r_cur=None,
@@ -145,6 +141,14 @@ def coarse_one_level(
             r=r_cur,
             mode=method,
             max_sigma=max_sigma,
+        )
+    elif method == "variation_star":
+        coarsening_list, sigma_l, done_flag = contract_variation_star(
+            G,
+            A=A,
+            r=r_cur,
+            max_sigma=max_sigma,
+            use_label_for_coarsening=use_label_for_coarsening,
         )
     else:
         coarsening_list, sigma_l, done_flag = contract_variation_edges(
@@ -654,6 +658,43 @@ def contract_variation_edges(
     return coarsening_list, sigma_l, done_flag
 
 
+def contract_variation_star(
+    G: Data,
+    A=None,
+    r=0.5,
+    max_sigma=float("inf"),
+    use_label_for_coarsening=False,
+):
+    """
+    Contraction using edge-based variation costs with star-shaped merging.
+
+    Same fast vectorized cost computation as variation_edges, but the greedy
+    matching allows a representative node to absorb multiple fresh neighbors
+    in a single level. This handles fan-in/fan-out patterns without needing
+    multiple hierarchical levels.
+    """
+    deg = G.dw
+    src = G.edge_index[0]
+    tgt = G.edge_index[1]
+
+    A_diff = A[src] - A[tgt]
+    diff_norm_sq = torch.sum(A_diff * A_diff, dim=1)
+    deg_sum = deg[src] + deg[tgt]
+    weights = 0.25 * (deg_sum**2) * (diff_norm_sq**2)
+
+    if use_label_for_coarsening and hasattr(G, "y_pred") and G.y_pred is not None:
+        different_labels = G.y_pred[src] != G.y_pred[tgt]
+        weights[different_labels] = float("inf")
+
+    coarsening_list, sigma_l, done_flag = matching_greedy_star(
+        G,
+        weights=weights,
+        r=r,
+        max_sigma=max_sigma,
+    )
+    return coarsening_list, sigma_l, done_flag
+
+
 # TODO(WHT): include features for each node
 def contract_variation_linear(
     G: Data,
@@ -663,180 +704,104 @@ def contract_variation_linear(
     max_sigma=float("inf"),
 ):
     """
-    Sequential contraction with local variation and general families.
-    This is an implemmentation that improves running speed,
-    at the expense of being more greedy (and thus having slightly larger error).
+    Sequential contraction with local variation and neighborhood-based families.
+    Greedily contracts the lowest-cost 1-hop neighborhood at each step.
 
-    See contract_variation() for documentation.
+    See contract_variation_edges() for the analogous edge-based version.
     """
+    N = G.num_nodes
+    deg = G.dw
+    edge_index = G.edge_index
+    edge_weight = G.edge_weight
+    device = edge_index.device
 
-    N, deg, W_lil = G.num_nodes, G.dw, G.W
+    # --- Build adjacency list from edge_index (O(M)) ---
+    src, tgt = edge_index[0], edge_index[1]
+    adj_nodes = [[] for _ in range(N)]  # neighbor indices
+    adj_weights = [[] for _ in range(N)]  # edge weights
+    for e in range(edge_index.shape[1]):
+        u, v = src[e].item(), tgt[e].item()
+        adj_nodes[u].append(v)
+        adj_weights[u].append(edge_weight[e].item())
 
-    # The following is correct only for a single level of coarsening.
+    # --- Compute cost for every 1-hop neighborhood ---
+    neighborhoods = [None] * N
+    costs = torch.full((N,), float("inf"))
 
-    # cost function for the subgraph induced by nodes array
-    def subgraph_cost(nodes):
-        if not isinstance(nodes, torch.Tensor):
-            nodes = torch.tensor(nodes, dtype=torch.long)
+    for i in range(N):
+        # Neighborhood = {i} ∪ N(i)
+        nbrs = adj_nodes[i]
+        nodes = torch.tensor([i] + nbrs, dtype=torch.long, device=device)
+        nodes = torch.unique(nodes)
+        neighborhoods[i] = nodes
         nc = len(nodes)
         if nc <= 1:
-            return 0.0
+            continue
 
-        # Create a sparse permutation matrix P
-        # P will be of size nc x N where nc = len(nodes)
-        # P[i,j] = 1 if j is the i-th node in 'nodes', otherwise 0
-        P_indices = torch.stack(
-            [
-                torch.arange(nc, device=W_lil.device),  # Row indices
-                nodes,  # Column indices
-            ]
-        )
-        P_values = torch.ones(nc, device=W_lil.device)
-        P = torch.sparse_coo_tensor(P_indices, P_values, (nc, N), device=W_lil.device)
+        # Build small dense W_sub via adjacency lookup
+        idx_map = {n.item(): k for k, n in enumerate(nodes)}
+        W_sub = torch.zeros(nc, nc, device=device)
+        for u_local, u in enumerate(nodes.tolist()):
+            for v, w in zip(adj_nodes[u], adj_weights[u]):
+                if v in idx_map:
+                    W_sub[u_local, idx_map[v]] = w
 
-        # Extract the subgraph weight matrix using P @ W_lil @ P.T
-        # First compute P @ W_lil
-        PW = torch.sparse.mm(P, W_lil)
-        # Then compute (P @ W_lil) @ P.T
-        W_sub = torch.sparse.mm(PW, P.t())
+        # Subgraph Laplacian (same convention as contract_variation_edges)
+        d_sub = W_sub.sum(dim=1)
+        L_sub = torch.diag(2 * deg[nodes] - d_sub) - W_sub
 
-        # Compute subgraph degree vector
-        d_sub = torch.sparse.sum(W_sub, dim=1).to_dense()
+        # Project A onto orthogonal complement of the constant vector
+        A_sub = A[nodes]
+        P_A = A_sub - A_sub.mean(dim=0)
 
-        # Create Laplacian using original degrees and subgraph connections
-        diag_values = 2 * deg[nodes] - d_sub
-        L_diag = torch.sparse_coo_tensor(
-            torch.stack([torch.arange(nc, device=W_lil.device)] * 2),
-            diag_values,
-            (nc, nc),
-            device=W_lil.device,
-        )
-        L = L_diag - W_sub
+        # Cost = ||P_A^T L P_A||_F / (nc - 1)
+        L_P_A = L_sub @ P_A
+        costs[i] = torch.norm(P_A.T @ L_P_A) / (nc - 1)
 
-        # Extract A submatrix using the same permutation approach
-        A_sub = A[nodes, :]
+    # --- Greedy independent-set selection (sorted by ascending cost) ---
+    idx = torch.argsort(costs)
 
-        # Compute projection matrix
-        ones = torch.ones(nc, device=W_lil.device) / nc
-        P_A_sub = A_sub - torch.outer(ones, torch.sum(A_sub, dim=0))
-
-        # Compute the final cost
-        if L.is_sparse:
-            L_P_A = torch.sparse.mm(L, P_A_sub)
-        else:
-            L_P_A = L @ P_A_sub
-
-        structural_cost = torch.norm(P_A_sub.t() @ L_P_A) / (nc - 1)
-        return structural_cost
-
-    class CandidateSet:
-        def __init__(self, candidate_list):
-            self.set = candidate_list
-            self.cost = subgraph_cost(candidate_list)
-
-        def __lt__(self, other):
-            return self.cost < other.cost
-
-    family = []
-    # W_bool = G.A + sparse_eye(G.num_nodes)
-    if "neighborhood" in mode:
-        for i in range(N):
-            # i_set = G.A[i,:].indices # graph_utils.get_neighbors(G, i)
-            # i_set = np.append(i_set, i)
-            # i_set = W_bool[i, :].indices
-            i_set = k_hop_subgraph(i, 1, G.edge_index, num_nodes=G.num_nodes)[0]
-            family.append(CandidateSet(i_set))
-
-    if "cliques" in mode:
-        import networkx.convert_matrix as nx
-
-        Gnx = nx.from_scipy_sparse_matrix(G.W)
-        for clique in nx.find_cliques(Gnx):
-            family.append(CandidateSet(torch.tensor(clique)))
-
-    else:
-        if "edges" in mode:
-            for e in range(0, G.edge_index.shape[1]):
-                family.append(CandidateSet(G.edge_index[:, e]))
-        if "triangles" in mode:
-            triangles = set([])
-            edges = G.edge_index
-            for e in range(0, edges.shape[1]):
-                [u, v] = edges[:, e]
-                u_i = int(u)
-                v_i = int(v)
-                for w in range(G.num_nodes):
-                    if G.W[u, w] > 0 and G.W[v, w] > 0:
-                        w_i = int(w)
-                        triangles.add(tuple(sorted((u_i, v_i, w_i))))
-            triangles = [torch.tensor(t, dtype=torch.long) for t in sorted(triangles)]
-            for triangle in triangles:
-                family.append(CandidateSet(triangle))
-
-    family = SortedList(family)
-    marked = torch.zeros(G.num_nodes, dtype=torch.bool)
-
-    # ----------------------------------------------------------------------------
-    # Construct a (minimum weight) independent set.
-    # ----------------------------------------------------------------------------
+    marked = torch.zeros(N, dtype=torch.bool)
     coarsening_list = []
-    # n, n_target = N, (1-r)*N
-    n_reduce = np.floor(r * N)  # how many nodes do we need to reduce/eliminate?
+    n_reduce = np.floor(r * N)
     max_sigma2 = max_sigma**2
     sigma_l_2 = 0.0
     count = 0
     done_flag = False
 
-    while len(family) > 0:
+    for k in range(N):
+        i = idx[k].item()
+        nodes = neighborhoods[i]
+        cost = costs[i].item()
 
-        i_cset = family.pop(index=0)
-        i_set = i_cset.set
-
-        if len(i_set) <= 1:
+        if len(nodes) <= 1:
             continue
+        if cost == float("inf"):
+            break
 
         # check cost threshold
-        if (sigma_l_2 + i_cset.cost) > max_sigma2:
+        if (sigma_l_2 + cost) > max_sigma2:
             if count == 0:
                 done_flag = True
             break
 
-        # check if marked
-        i_marked = marked[i_set]
+        # skip if any node already contracted
+        if marked[nodes].any():
+            continue
 
-        if not any(i_marked):
+        n_gain = len(nodes) - 1
+        if n_gain > n_reduce:
+            continue  # avoid over-reducing
 
-            n_gain = len(i_set) - 1
-            if n_gain > n_reduce:
-                continue  # this helps avoid over-reducing
+        marked[nodes] = True
+        coarsening_list.append({"list": nodes, "cost": cost})
+        n_reduce -= n_gain
+        sigma_l_2 += cost
+        count += 1
 
-            # print(f"{sim=}, {len(i_set)=}, {i_set=}, {X[i_set]=}")
+        if n_reduce <= 0:
+            break
 
-            # probability based on similarity merging
-
-            # all vertices are unmarked: add i_set to the coarsening list
-            marked[i_set] = True
-            coarsening_list.append({"list": i_set, "cost": i_cset.cost})
-            # n -= len(i_set) - 1
-            n_reduce -= n_gain
-
-            # if n <= n_target: break
-            if n_reduce <= 0:
-                break
-
-            count += 1
-            sigma_l_2 += i_cset.cost
-
-        # may be worth to keep this set
-        # else:
-        #     i_set = i_set[~i_marked]
-        #     if len(i_set) > 1:
-        #         # todo1: check whether to add to coarsening_list before adding to family
-        #         # todo2: currently this will also select contraction sets that are disconnected
-        #         # should we eliminate those?
-        #         i_cset.set = i_set
-        #         i_cset.cost = subgraph_cost(i_set)
-        #         family.add(i_cset)
     sigma_l = np.sqrt(sigma_l_2)
     return coarsening_list, sigma_l, done_flag
 
@@ -959,6 +924,12 @@ def matching_greedy(
     # the edge set
     edges = G.edge_index
 
+    # Deduplicate bidirectional edges: keep only (u,v) where u < v
+    src, tgt = edges[0], edges[1]
+    keep = src < tgt
+    edges = edges[:, keep]
+    weights = weights[keep]
+
     idx = torch.argsort(weights, stable=False)
     edges = edges[:, idx]
     weights = weights[idx]
@@ -1011,3 +982,117 @@ def matching_greedy(
 
     sigma_l = sigma_l_2**0.5
     return matching, sigma_l, done_flag
+
+
+def matching_greedy_star(
+    G: Data,
+    weights,
+    r=0.4,
+    max_sigma=float("inf"),
+    deg_ratio=500.5,
+):
+    """
+    Adaptive greedy matching that combines star and pairwise strategies.
+
+    For each edge in ascending cost order, the higher-degree endpoint is the
+    candidate representative (rep) and the lower-degree one is the leaf.
+
+    - If rep's degree >= deg_ratio * leaf's degree (hub pattern), rep stays
+      open after the merge and can absorb additional fresh neighbors later
+      (star behaviour for fan-in / fan-out).
+    - Otherwise both nodes are locked after the merge (pairwise behaviour,
+      optimal for cycles and regular subgraphs).
+
+    Parameters
+    ----------
+    deg_ratio : float
+        Degree ratio threshold to decide star vs pairwise merging.
+        Default 1.5.  Set to inf to get pure pairwise (=variation_edges).
+        Set to 1.0 to get pure star.
+    """
+    done_flag = False
+    N = G.num_nodes
+    edges = G.edge_index
+    deg = G.dw
+
+    # Deduplicate bidirectional edges: keep only (u,v) where u < v
+    src, tgt = edges[0], edges[1]
+    keep = src < tgt
+    edges = edges[:, keep]
+    weights = weights[keep]
+
+    idx = torch.argsort(weights, stable=False)
+    edges = edges[:, idx]
+    weights = weights[idx]
+
+    candidate_edges = edges.T.tolist()
+    max_sigma2 = max_sigma**2
+
+    # Node states:
+    #   absorbed[i] = True  → node i has been absorbed into another supernode
+    #   rep_of[i]   >= 0    → node i is the representative of group rep_of[i]
+    absorbed = torch.zeros(N, dtype=torch.bool)
+    rep_of = torch.full((N,), -1, dtype=torch.long)
+
+    groups = []  # list of {"members": [int, ...], "cost": float}
+    n = N
+    n_target = (1 - r) * N if r is not None else None
+    sigma_l_2 = 0.0
+    count = 0
+
+    T = len(candidate_edges)
+    for t in range(T):
+        if n_target is not None and n <= n_target:
+            break
+
+        [u, v] = candidate_edges[t]
+        cost = weights[t].item()
+
+        if (sigma_l_2 + cost) > max_sigma2:
+            if count == 0:
+                done_flag = True
+            break
+
+        # Orient edge so that rep = higher-degree node, leaf = lower-degree node.
+        if deg[u] >= deg[v]:
+            rep, leaf = u, v
+        else:
+            rep, leaf = v, u
+
+        # leaf must be fresh (not absorbed, not a representative)
+        if absorbed[leaf] or rep_of[leaf] >= 0:
+            continue
+        # rep must not be absorbed (but can already be a representative)
+        if absorbed[rep]:
+            continue
+
+        # Decide star vs pairwise based on degree ratio
+        is_hub = deg[rep] >= deg_ratio * deg[leaf]
+
+        if rep_of[rep] >= 0:
+            # rep is already a representative → extend its group with leaf
+            # (only reachable when rep was kept open by a previous hub merge)
+            g = rep_of[rep].item()
+            groups[g]["members"].append(leaf)
+            groups[g]["cost"] += cost
+        else:
+            # Both fresh → create new group with rep as representative
+            g = len(groups)
+            groups.append({"members": [rep, leaf], "cost": cost})
+            if is_hub:
+                rep_of[rep] = g  # keep rep open for more absorptions
+
+        absorbed[leaf] = True
+        if not is_hub:
+            # Pairwise mode: lock rep too (like variation_edges)
+            absorbed[rep] = True
+            n -= 2
+        else:
+            n -= 1
+
+        sigma_l_2 += cost
+        count += 1
+
+    coarsening_list = [{"list": g["members"], "cost": g["cost"]} for g in groups]
+    sigma_l = sigma_l_2**0.5
+    return coarsening_list, sigma_l, done_flag

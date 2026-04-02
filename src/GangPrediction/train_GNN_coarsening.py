@@ -78,7 +78,7 @@ def train_GNN_coarsening_aware_loss(
     levels: int,
     lr=0.01,
     wd=5e-4,
-    method="variation_neighborhoods",
+    method="variation_neighborhood",
     algorithm: str = "greedy",
     max_epsilon=float("inf"),
     K=50,
@@ -209,7 +209,7 @@ def train_GNN_coarsening_aware_loss(
     elif method == "variation_embedding":
         Uk = calc_B_embedding(data, K)
         B = calc_B(data, K, U=Uk)
-    elif method == "variation_edges":
+    elif "variation" in method:
         B = calc_B(data, K)
         # B2 = calc_B(G, K)
         # B = torch.concat([B1, B2], dim=1)

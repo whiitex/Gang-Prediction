@@ -178,7 +178,7 @@ def run_experiment():
 
     Gall_test, _, _, _, results_history_test = train_GNN_coarsening_aware_loss(
         G_test,
-        levels=5,
+        levels=MAX_LEVELS,
         method=METHOD,
         max_epsilon=MAX_EPSILON,
         train=False,
