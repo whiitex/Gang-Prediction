@@ -41,6 +41,7 @@ def _build_pattern_labels(
         if nodes.size == 0:
             continue
         pattern_id[nodes] = next_id
+        # pattern_id[nodes] = p.pattern_id if hasattr(p, "pattern_id") else next_id
         pattern_type[nodes] = 1
         subtype = getattr(p, "pattern_type", "unknown")
         pattern_subtype[nodes] = subtype
@@ -50,7 +51,8 @@ def _build_pattern_labels(
         nodes = _safe_to_numpy(p.node_indices).astype(np.int64)
         if nodes.size == 0:
             continue
-        pattern_id[nodes] = next_id
+        pattern_id[nodes] =  next_id
+        # pattern_id[nodes] = p.pattern_id if hasattr(p, "pattern_id") else next_id
         pattern_type[nodes] = 0
         subtype = getattr(p, "pattern_type", "unknown")
         pattern_subtype[nodes] = subtype

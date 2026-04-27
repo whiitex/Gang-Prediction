@@ -7,9 +7,13 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from src.GangPrediction.GNN_model import GCN
+from src.GangPrediction.dual_head_model import DualHeadGNN, DualHeadWrapper
 from src.GangPrediction.training import train_gnn_1_epoch, evaluate_model
-from src.GangPrediction.gang_aware_subspace import get_gang_aware_basis
-from src.GangPrediction.experiment_utils import create_subspace
+from src.GangPrediction.gang_aware_subspace import (
+    get_gang_aware_basis,
+    get_qtrick_basis,
+)
+from src.GangPrediction.experiment_utils import create_subspace, calc_B_from_embeddings
 from src.GangPrediction.coarsening_aware_loss import *
 from src.GangPrediction.coarsening_utils import *
 from src.GangPrediction.graph_utils import *
@@ -63,7 +67,6 @@ def train_GNN(
             optimizer,
             criterion,
             data,
-            coarse_loss=False,
         )
         bar.set_postfix_str(
             f"Epoch {epoch + 1}/{epochs}, Loss: {train_loss:.4f}, Accuracy: {train_acc:.4f}"
@@ -102,9 +105,9 @@ def train_GNN_coarsening_aware_loss(
     train=False,
     model=None,
     num_layers=2,
-    coarsening_weight=1.0,
     use_label_for_coarsening=False,
-    use_super_node_loss=False,
+    # Learned variation edges parameters
+    pretrain_epochs=0,
     **kwargs,
 ):
     """
@@ -125,12 +128,28 @@ def train_GNN_coarsening_aware_loss(
     nclass = len(np.unique(data.y.numpy()))
 
     if model is None:
+        GNN_type = kwargs.get("GNN_type", "DGCN")
+        use_edge_weights = kwargs.get("use_edge_weights", False)
+        # dual_head = DualHeadGNN(
+        #     nfeat=data.num_features,
+        #     nhid=nhid,
+        #     nclass=nclass,
+        #     basis_dim=K,
+        #     num_layers=num_layers,
+        #     dropout=dropout,
+        #     GNN_type=GNN_type,
+        #     use_edge_weights=use_edge_weights,
+        # ).to(device=device)
+        # model = DualHeadWrapper(dual_head)
+        # else:
         model = GCN(
             nfeat=data.num_features,
             nhid=nhid,
             nclass=nclass,
             dropout=dropout,
             num_layers=num_layers,
+            GNN_type=GNN_type,
+            use_edge_weights=use_edge_weights,
         ).to(device=device)
 
     # Compute class weights for imbalanced data
@@ -147,11 +166,7 @@ def train_GNN_coarsening_aware_loss(
             class_weights=class_weights,
             alert_patterns=alert_train_patterns,
             normal_patterns=normal_train_patterns,
-            use_supernode_loss=use_super_node_loss
-            and (
-                True if "learning" in method else False
-            ),  # Enable supernode loss when learning B
-            coarse_weight=coarsening_weight,
+            **kwargs,
         )
 
         # train data
@@ -167,6 +182,45 @@ def train_GNN_coarsening_aware_loss(
 
     original_data = data
     Gc = data
+    C = sparse_eye(N)
+    C_plus = sparse_eye(N)
+    P = torch.sparse.mm(C_plus, C)
+
+    # ---- Pre-training phase for learned_variation_edges ----
+    if train and pretrain_epochs > 0:
+        print(
+            f"\n[Learned Variation Edges] Pre-training for {pretrain_epochs} epochs..."
+        )
+        model.train()
+        pretrain_bar = tqdm(total=pretrain_epochs, desc="Pre-training")
+        for epoch in range(pretrain_epochs):
+            train_loss, train_acc, loss_components = train_gnn_1_epoch(
+                model,
+                optimizer=optimizer,
+                criterion=criterion,
+                data=Gc,
+                C_plus=C_plus,
+                P=P,
+                L=data.L,
+                original_data=original_data,
+                # coarse_loss=epoch < active_coarse_loss_epochs,
+                return_loss_components=True,
+            )
+
+            pretrain_bar.set_postfix_str(
+                f"cls={loss_components['loss_cls']:.4f} "
+                f"supernode={loss_components['loss_supernode']:.4f} "
+                f"total={loss_components['loss_total']:.4f}"
+            )
+            pretrain_bar.update(1)
+        pretrain_bar.close()
+
+        # Reduce LR for coarsening phase (slow updates)
+        for pg in optimizer.param_groups:
+            new_lr = lr * 0.33
+            pg["lr"] = new_lr
+        print(f"[Learned Variation Edges] Pre-training done. LR reduced to {new_lr}")
+    # ---- End pre-training phase ----
 
     # Create one-hot encoding of labels for soft label aggregation at coarse levels.
     tensor_device = Gc.y.device
@@ -186,8 +240,6 @@ def train_GNN_coarsening_aware_loss(
     Gc.y_test[Gc.test_idx, :] = Gc.soft_y[Gc.test_idx, :]
 
     # Initialize coarsening matrices and a layout for visualization/debugging.
-    C = sparse_eye(N)
-    C_plus = sparse_eye(N)
 
     # L_plus = calc_L_half(Gc)  # Precompute L_half for variation-based coarsening
 
@@ -206,13 +258,25 @@ def train_GNN_coarsening_aware_loss(
         B = calc_B(data, Uk.shape[1], U=Uk)  # Precompute eigenvectors
         # B = calc_B(G, K, U=Uk)  # Precompute eigenvectors
         print(f"Gang-aware basis shape: {B.shape}")
+    elif method == "qtrick":
+        B = get_qtrick_basis(
+            data,
+            alert_patterns=alert_train_patterns,
+            normal_patterns=normal_train_patterns,
+            K=K,
+            include_free_nodes=kwargs.get("qtrick_include_free_nodes", True),
+        )
+        print(f"Q-trick basis shape: {B.shape}")
     elif method == "variation_embedding":
         Uk = calc_B_embedding(data, K)
         B = calc_B(data, K, U=Uk)
     elif "variation" in method:
         B = calc_B(data, K)
-        # B2 = calc_B(G, K)
-        # B = torch.concat([B1, B2], dim=1)
+    elif method == "use_subspaces":
+        alert_patterns_ = alert_train_patterns + alert_patterns
+        normal_patterns_ = normal_train_patterns + normal_patterns
+        B = create_subspace(alert_patterns_, normal_patterns_, N, device)
+        # B = torch.sparse.mm(C, V)  # Initial B for the first coarsened graph
     else:
         # For learning_subspace, we will compute the basis dynamically during training
         B = None
@@ -253,10 +317,10 @@ def train_GNN_coarsening_aware_loss(
                 V = calc_B_from_embeddings(G_embeddings)
                 # learned_basis_rows = V.detach()
                 B = torch.sparse.mm(C, V)  # Update B for the current coarsened graph
-        elif method == "use_subspaces":
-            V = create_subspace(alert_train_patterns, normal_train_patterns, N, device)
-            # V = create_subspace(alert_patterns, normal_patterns, N, device)
-            B = torch.sparse.mm(C, V)  # Update B for the current coarsened graph
+        # elif method == "use_subspaces":
+        #     V = create_subspace(alert_train_patterns, normal_train_patterns, N, device)
+        #     # V = create_subspace(alert_patterns, normal_patterns, N, device)
+        #     B = torch.sparse.mm(C, V)  # Update B for the current coarsened graph
         elif method == "learning_vectors":
             with torch.no_grad():
                 G_embeddings = model.get_embeddings(
@@ -288,7 +352,6 @@ def train_GNN_coarsening_aware_loss(
             B=B,
             method=method,
             algorithm=algorithm,
-            level=level,
             r_cur=ratio,
             max_sigma=max_sigma,
             use_label_for_coarsening=use_label_for_coarsening,
@@ -316,7 +379,7 @@ def train_GNN_coarsening_aware_loss(
         if train:
             # Dynamic epoch scheduling: only train if at the right interval
             if level % epoch_interval == 0:
-                active_coarse_loss_epochs = max(0, current_epochs)
+                # active_coarse_loss_epochs = max(0, current_epochs)
                 epoch_loss_components = {
                     "loss_total": [],
                     "loss_cls": [],
@@ -333,7 +396,7 @@ def train_GNN_coarsening_aware_loss(
                         P=P,
                         L=data.L,
                         original_data=original_data,
-                        coarse_loss=epoch < active_coarse_loss_epochs,
+                        # coarse_loss=epoch < active_coarse_loss_epochs,
                         return_loss_components=True,
                         # class_weights=class_weights,
                     )
@@ -412,6 +475,7 @@ def train_GNN_coarsening_aware_loss(
         results["loss_total"] = level_loss_total
         results["loss_cls"] = level_loss_cls
         results["loss_supernode"] = level_loss_supernode
+
         results_history.append(results)
         alert_rate = results["alert_metrics"].get("detection_rate", 0)
         normal_rate = results["normal_metrics"].get("detection_rate", 0)

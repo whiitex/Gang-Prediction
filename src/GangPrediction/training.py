@@ -30,7 +30,6 @@ def train_gnn_1_epoch(
     P=None,
     L=None,
     original_data=None,
-    coarse_loss: bool = False,
     return_loss_components: bool = False,
     # class_weights: torch.Tensor = None,
 ):
@@ -69,18 +68,16 @@ def train_gnn_1_epoch(
 
     # train
     # embeddings = data.embeddings if hasattr(data, "embeddings") else None
-    if original_data is not None and coarse_loss:
+    if original_data is not None and criterion.use_supernode_loss:
         embeddings = model.get_embeddings(
             original_data.x,
             original_data.edge_index,
-            original_data.edge_weight if hasattr(data, "edge_weight") else None,
+            original_data.edge_weight if hasattr(original_data, "edge_weight") else None,
         )
     else:
         embeddings = None
     # embeddings = F.normalize(embeddings, p=2, dim=1)
-    loss, loss_super_node, loss_cls = criterion(
-        logits, y, train_idx, embeddings, coarse_loss=coarse_loss, P=P, L=L
-    )
+    loss = criterion(logits, y, train_idx, embeddings, P=P, L=L)
     loss.backward()
     optimizer.step()
     train_acc = accuracy_score(
@@ -91,8 +88,6 @@ def train_gnn_1_epoch(
     if return_loss_components:
         components = {
             "loss_total": loss.item(),
-            "loss_cls": loss.item(),
-            "loss_supernode": 0.0,
         }
         if hasattr(criterion, "latest_loss_components"):
             components.update(criterion.latest_loss_components)

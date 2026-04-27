@@ -23,6 +23,8 @@ from src.GangPrediction.experiment_utils import (
     create_subspace,
     load_and_preprocess_data,
 )
+from src.GangPrediction.elliptic_loader import load_elliptic_data
+from src.GangPrediction.elliptic_actors_loader import load_elliptic_actors_data
 from src.GangPrediction.plotting import (
     plot_all_results,
     plot_training_loss_components,
@@ -73,16 +75,50 @@ def run_experiment():
 
     # Load data
     print("=" * 60)
-    print("Loading AMLGentex Dataset")
-    print("=" * 60)
-    G, alert_train, normal_train, alert_test, normal_test = load_and_preprocess_data(
-        data_dir=experiment_root / "config",
-        patterns_dir=experiment_root,
-        train_ratio=PATTERN_SPLIT_CONFIG.get("train_ratio", 0.5),
-        to_undirected="variation" in METHOD.lower(),
-        remove_overlaps=CONFIG.get("remove_overlaps", True),
-        device=device,
-    )
+    dataset_type = CONFIG.get("dataset_type", "amlgentex")
+    elliptic_cfg = CONFIG.get("elliptic_config", {})
+    if dataset_type == "elliptic":
+        print("Loading Elliptic++ Transactions Dataset")
+        print("=" * 60)
+        G, alert_train, normal_train, alert_test, normal_test = load_elliptic_data(
+            data_dir=project_root / elliptic_cfg.get("data_dir", "data/elliptic"),
+            day_start=int(elliptic_cfg.get("day_start", 27)),
+            day_end=int(elliptic_cfg.get("day_end", 35)),
+            to_undirected="variation" in METHOD.lower(),
+            train_ratio=PATTERN_SPLIT_CONFIG.get("train_ratio", 0.5),
+            min_pattern_size=int(elliptic_cfg.get("min_pattern_size", 2)),
+            seed=int(elliptic_cfg.get("seed", 42)),
+            device=device,
+        )
+    elif dataset_type == "elliptic_actors":
+        print("Loading Elliptic++ Actors (Wallet Addresses) Dataset")
+        print("=" * 60)
+        G, alert_train, normal_train, alert_test, normal_test = (
+            load_elliptic_actors_data(
+                data_dir=project_root
+                / elliptic_cfg.get("actors_data_dir", "data/elliptic_actors"),
+                day_start=int(elliptic_cfg.get("day_start", 27)),
+                day_end=int(elliptic_cfg.get("day_end", 35)),
+                to_undirected="variation" in METHOD.lower(),
+                train_ratio=PATTERN_SPLIT_CONFIG.get("train_ratio", 0.5),
+                min_pattern_size=int(elliptic_cfg.get("min_pattern_size", 2)),
+                seed=int(elliptic_cfg.get("seed", 42)),
+                device=device,
+            )
+        )
+    else:
+        print("Loading AMLGentex Dataset")
+        print("=" * 60)
+        G, alert_train, normal_train, alert_test, normal_test = (
+            load_and_preprocess_data(
+                data_dir=experiment_root / "config",
+                patterns_dir=experiment_root,
+                train_ratio=PATTERN_SPLIT_CONFIG.get("train_ratio", 0.5),
+                to_undirected="variation" in METHOD.lower(),
+                remove_overlaps=CONFIG.get("remove_overlaps", True),
+                device=device,
+            )
+        )
 
     if PLOT_GIFS:
         colors0, pos0 = get_pattern_colors_and_positions(G, alert_train, normal_train)
@@ -164,40 +200,82 @@ def run_experiment():
         f"coarse_acc={results_history[-1]['accuracy_test']:.4f}, fine_acc={results_history[-1]['accuracy_fine']:.4f}"
     )
 
-    EXPERIMENT_test = "tutorial_demo14"
-    experiment_root_test = project_root / "experiments" / EXPERIMENT_test
-    # Train coarsening-aware model
-    G_test, _, _, alert_test2, normal_test2 = load_and_preprocess_data(
-        data_dir=experiment_root_test / "config",
-        patterns_dir=experiment_root_test,
-        train_ratio=0,
-        to_undirected="variation" in METHOD.lower(),
-        remove_overlaps=CONFIG.get("remove_overlaps", True),
-        device=device,
-    )
+    run_test = bool(CONFIG.get("run_test", True))
+    if run_test:
+        EXPERIMENT_test = "tutorial_demo14"
+        experiment_root_test = project_root / "experiments" / EXPERIMENT_test
+        # Load test graph — reuse Elliptic loader when dataset_type == "elliptic"
+        if dataset_type in ("elliptic", "elliptic_actors"):
+            test_day_start = int(
+                elliptic_cfg.get(
+                    "test_day_start", int(elliptic_cfg.get("day_end", 35)) + 1
+                )
+            )
+            test_day_end = int(elliptic_cfg.get("test_day_end", 49))
+            if dataset_type == "elliptic":
+                G_test, _, _, alert_test2, normal_test2 = load_elliptic_data(
+                    data_dir=project_root
+                    / elliptic_cfg.get("data_dir", "data/elliptic"),
+                    day_start=test_day_start,
+                    day_end=test_day_end,
+                    to_undirected="variation" in METHOD.lower(),
+                    train_ratio=0,  # all patterns go to the test split
+                    min_pattern_size=int(elliptic_cfg.get("min_pattern_size", 2)),
+                    seed=int(elliptic_cfg.get("seed", 42)),
+                    device=device,
+                )
+            else:
+                G_test, _, _, alert_test2, normal_test2 = load_elliptic_actors_data(
+                    data_dir=project_root
+                    / elliptic_cfg.get("actors_data_dir", "data/elliptic_actors"),
+                    day_start=test_day_start,
+                    day_end=test_day_end,
+                    to_undirected="variation" in METHOD.lower(),
+                    train_ratio=0,
+                    min_pattern_size=int(elliptic_cfg.get("min_pattern_size", 2)),
+                    seed=int(elliptic_cfg.get("seed", 42)),
+                    device=device,
+                )
+            alert_train2, normal_train2 = [], []
+        else:
+            G_test, alert_train2, normal_train2, alert_test2, normal_test2 = (
+                load_and_preprocess_data(
+                    data_dir=experiment_root_test / "config",
+                    patterns_dir=experiment_root_test,
+                    train_ratio=0,
+                    to_undirected="variation" in METHOD.lower(),
+                    remove_overlaps=CONFIG.get("remove_overlaps", True),
+                    device=device,
+                )
+            )
 
-    Gall_test, _, _, _, results_history_test = train_GNN_coarsening_aware_loss(
-        G_test,
-        levels=MAX_LEVELS,
-        method=METHOD,
-        max_epsilon=MAX_EPSILON,
-        train=False,
-        model=model,
-        alert_thresholds=ALERT_THRESHOLDS,
-        normal_thresholds=NORMAL_THRESHOLDS,
-        alert_patterns=alert_test2,
-        normal_patterns=normal_test2,
-        epsilon_schedule_power=0.0,
-        use_label_for_coarsening=PATTERN_SPLIT_CONFIG.get(
-            "use_label_for_coarsening", False
-        ),
-    )
+        Gall_test, _, _, _, results_history_test = train_GNN_coarsening_aware_loss(
+            G_test,
+            levels=MAX_LEVELS,
+            method=METHOD,
+            max_epsilon=MAX_EPSILON,
+            train=False,
+            model=model,
+            alert_thresholds=ALERT_THRESHOLDS,
+            normal_thresholds=NORMAL_THRESHOLDS,
+            alert_train_patterns=alert_train2,
+            normal_train_patterns=normal_train2,
+            alert_patterns=alert_test2,
+            normal_patterns=normal_test2,
+            epsilon_schedule_power=0.0,
+            use_label_for_coarsening=PATTERN_SPLIT_CONFIG.get(
+                "use_label_for_coarsening", False
+            ),
+        )
 
-    # Load saved results
-    LOGGER.info(
-        f"Final: nodes={Gall_test[-1].num_nodes}, edges={Gall_test[-1].num_edges}, "
-        f"coarse_acc={results_history_test[-1]['accuracy_test']:.4f}, fine_acc={results_history_test[-1]['accuracy_fine']:.4f}"
-    )
+        # Load saved results
+        LOGGER.info(
+            f"Final: nodes={Gall_test[-1].num_nodes}, edges={Gall_test[-1].num_edges}, "
+            f"coarse_acc={results_history_test[-1]['accuracy_test']:.4f}, fine_acc={results_history_test[-1]['accuracy_fine']:.4f}"
+        )
+    else:
+        LOGGER.info("run_test=false — skipping held-out test graph evaluation.")
+        results_history_test = []
 
     # Save coarsening-aware model
     coarse_model_path = Path(save_path) / "models" / "coarsening_aware_model.pt"
@@ -347,8 +425,8 @@ def run_experiment():
         # final_embeddings = create_subspace(alert_test, normal_test, N, device)
     generate_diagnostic_plots_for_final_state(
         embeddings=final_embeddings,
-        alert_patterns=alert_train,
-        normal_patterns=normal_train,
+        alert_patterns=alert_test,
+        normal_patterns=normal_test,
         save_dir=str(train_path),
     )
 

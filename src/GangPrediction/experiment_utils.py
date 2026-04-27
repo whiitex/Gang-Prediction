@@ -293,7 +293,7 @@ def split_patterns(
     test_patterns = shuffled_patterns[n_train:]
 
     # Keep split randomization while returning deterministic, type-grouped lists.
-    sort_key = lambda p: (str(p.pattern_type), str(p.pattern_id))
+    sort_key = lambda p: (p.pattern_id)
     train_patterns = sorted(train_patterns, key=sort_key)
     test_patterns = sorted(test_patterns, key=sort_key)
 
@@ -449,10 +449,86 @@ def create_subspace(alert_patterns, normal_patterns, num_nodes, device):
     pattern_type_to_idx_normal = {t: i for i, t in enumerate(normal_pattern_types)}
     for p in alert_patterns:
         idx = pattern_type_to_idx_alert[p.pattern_type]
+        V_alert[p.nodes, :] = 0.0
+        V_normal[p.nodes, :] = 0.0
         V_alert[p.nodes, idx] = 1.0
     for p in normal_patterns:
         idx = pattern_type_to_idx_normal[p.pattern_type]
+        V_normal[p.nodes, :] = 0.0
+        V_alert[p.nodes, :] = 0.0
         V_normal[p.nodes, idx] = 1.0
     U = torch.cat([V_alert, V_normal], dim=1)
     return U
     # return V_alert
+
+
+def l_orthonormalize(Z, L, eps=1e-6, remove_constant=True):
+    """
+    Z: [N, k]
+    L: [N, N] symmetric PSD
+    returns U with approximately U.T @ L @ U = I
+    """
+    N, k = Z.shape
+
+    if remove_constant:
+        Z = Z - Z.mean(dim=0, keepdim=True)
+
+    G = Z.T @ torch.sparse.mm(L.T, L) @ Z
+    G = G + eps * torch.eye(k, device=Z.device, dtype=Z.dtype)
+
+    # G = R^T R
+    R = torch.linalg.cholesky(G, upper=True)
+
+    # U = Z @ R^{-1}
+    # better than explicit inverse:
+    U = torch.linalg.solve_triangular(R, Z.T, upper=True, left=False).T
+
+    return U
+
+
+def calc_B_from_embeddings(embeddings: torch.Tensor, K: int = None) -> torch.Tensor:
+    """
+    Compute an orthonormal basis B from learned node embeddings.
+
+    The embeddings learned by the GNN (with SupernodeEmbeddingLoss) naturally
+    encode the coarsening structure: nodes in the same supernode have similar
+    embeddings. We extract an orthonormal basis from these embeddings.
+
+    Args:
+        embeddings: [N, D] node embeddings (should be normalized)
+        K: Number of basis vectors to return. If None, use min(N, D)
+
+    Returns:
+        B: [N, K] orthonormal basis matrix
+    """
+    N, D = embeddings.shape
+
+    if K is None:
+        K = min(N, D)
+    K = min(K, N, D)
+
+    # Normalize embeddings
+    # embeddings_norm = F.normalize(embeddings, p=2, dim=1)
+
+    # SVD to get orthonormal basis
+    # U @ S @ V^T = embeddings
+    # U: [N, K] orthonormal columns (our B)
+    # S: [K] singular values
+    # V: [D, K] orthonormal columns
+    # try:
+    #     U, S, Vh = torch.linalg.svd(embeddings, full_matrices=False)
+
+    #     # Take the top K left singular vectors as basis
+    #     B = U[:, :K]
+
+    #     # Weight by singular values (optional, for smoothness)
+    #     # S_weights = S[:K] / (S[:K].max() + 1e-6)
+    #     # B = B * S_weights.unsqueeze(0)
+
+    # except Exception as e:
+    #     # Fallback to QR decomposition if SVD fails
+    # print(f"SVD failed ({e}), falling back to QR decomposition")
+    Q, R = torch.linalg.qr(embeddings)
+    B = Q[:, :K]
+
+    return B

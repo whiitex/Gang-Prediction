@@ -1,0 +1,274 @@
+"""Loader for the Elliptic++ Transactions dataset.
+
+Reads the three raw CSV files (txs_features.csv, txs_classes.csv,
+txs_edgelist.csv) from *data_dir*, filters to the requested time-step window,
+builds a PyG Data graph, and derives alert / normal patterns from connected
+components of illicit / licit nodes respectively.
+
+Expected CSV files in *data_dir*
+---------------------------------
+txs_features.csv  — columns: txId, Time step, Local_feature_1 … Aggregate_feature_72 …
+txs_classes.csv   — columns: txId, class   (1=illicit, 2=licit, 3=unknown)
+txs_edgelist.csv  — columns: txId1, txId2
+"""
+
+import random
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import networkx as nx
+import numpy as np
+import pandas as pd
+import torch
+import torch_geometric.data
+import torch_geometric.transforms
+from sklearn.preprocessing import MinMaxScaler
+
+from src.GangPrediction.pattern_models import Pattern, create_pattern
+from src.GangPrediction.experiment_utils import split_patterns, get_pattern_node_indices
+from src.GangPrediction.utils.utils import graph_params
+
+
+# ---------------------------------------------------------------------------
+# Public interface
+# ---------------------------------------------------------------------------
+
+
+def load_elliptic_data(
+    data_dir: Path,
+    day_start: int = 27,
+    day_end: int = 35,
+    to_undirected: bool = True,
+    train_ratio: float = 0.5,
+    min_pattern_size: int = 2,
+    max_pattern_size: Optional[int] = None,
+    seed: Optional[int] = 42,
+    device: Optional[torch.device] = None,
+) -> Tuple[
+    torch_geometric.data.Data,
+    List[Pattern],
+    List[Pattern],
+    List[Pattern],
+    List[Pattern],
+]:
+    """Load Elliptic++ transaction dataset filtered to *day_start*–*day_end*.
+
+    Parameters
+    ----------
+    data_dir       : directory containing txs_features.csv, txs_classes.csv,
+                     txs_edgelist.csv
+    day_start      : first time step to include (inclusive)
+    day_end        : last  time step to include (inclusive)
+    to_undirected  : symmetrize the graph
+    train_ratio    : fraction of patterns used for training
+    min_pattern_size: minimum number of nodes for a component to become a pattern
+    max_pattern_size: if set, skip components larger than this (avoids huge "hub" patterns)
+    seed           : random seed for pattern split
+    device         : torch device
+
+    Returns
+    -------
+    G              : PyG Data with x, edge_index, edge_attr, y, W, L, dw,
+                     train_idx, val_idx, test_idx
+    alert_train, normal_train, alert_test, normal_test : List[Pattern]
+    """
+    if device is None:
+        device = torch.device("cpu")
+
+    data_dir = Path(data_dir)
+
+    # ------------------------------------------------------------------
+    # 1. Load & filter raw CSV files
+    # ------------------------------------------------------------------
+    print(f"  Reading txs_features.csv …")
+    features_df = pd.read_csv(data_dir / "txs_features.csv")
+
+    print(f"  Reading txs_classes.csv …")
+    classes_df = pd.read_csv(data_dir / "txs_classes.csv")
+
+    print(f"  Reading txs_edgelist.csv …")
+    edgelist_df = pd.read_csv(data_dir / "txs_edgelist.csv")
+
+    # Filter features to the requested time window
+    features_df = features_df[
+        features_df["Time step"].between(day_start, day_end)
+    ].copy()
+
+    print(
+        f"  Time steps {day_start}–{day_end}: {len(features_df):,} transactions "
+        f"({features_df['Time step'].nunique()} distinct steps)"
+    )
+
+    # ------------------------------------------------------------------
+    # 2. Merge with class labels
+    # ------------------------------------------------------------------
+    nodes_df = features_df.merge(classes_df, on="txId", how="left")
+    nodes_df["class"] = nodes_df["class"].fillna(3).astype(int)
+
+    # Re-index nodes contiguously 0 … N-1
+    node_to_index: dict = {
+        tx_id: idx for idx, tx_id in enumerate(nodes_df["txId"].values)
+    }
+    N = len(nodes_df)
+    print(f"  Nodes in subgraph: {N:,}")
+
+    # ------------------------------------------------------------------
+    # 3. Node features  (drop metadata columns, fill NaN, normalize)
+    # ------------------------------------------------------------------
+    meta_cols = ["txId", "Time step", "class"]
+    feature_cols = [c for c in nodes_df.columns if c not in meta_cols]
+
+    X = nodes_df[feature_cols].fillna(0.0).to_numpy(dtype=np.float32)
+    scaler = MinMaxScaler()
+    X = scaler.fit_transform(X).astype(np.float32)
+
+    # ------------------------------------------------------------------
+    # 4. Labels  (class 1 → 1 suspicious, class 2/3 → 0)
+    # ------------------------------------------------------------------
+    y = (nodes_df["class"].values == 1).astype(np.int64)
+
+    print(
+        f"  Illicit (class=1): {(y==1).sum():,}  |  "
+        f"Licit (class=2): {(nodes_df['class']==2).sum():,}  |  "
+        f"Unknown (class=3): {(nodes_df['class']==3).sum():,}"
+    )
+
+    # ------------------------------------------------------------------
+    # 5. Edges — keep only edges within the filtered node set
+    # ------------------------------------------------------------------
+    node_set = set(node_to_index.keys())
+    edge_mask = edgelist_df["txId1"].isin(node_set) & edgelist_df["txId2"].isin(
+        node_set
+    )
+    edges_filtered = edgelist_df[edge_mask].copy()
+
+    src_idx = edges_filtered["txId1"].map(node_to_index).to_numpy(dtype=np.int64)
+    dst_idx = edges_filtered["txId2"].map(node_to_index).to_numpy(dtype=np.int64)
+    edges = np.stack([src_idx, dst_idx], axis=1)  # (M, 2)
+
+    print(f"  Edges in subgraph: {len(edges):,}")
+
+    # ------------------------------------------------------------------
+    # 6. Build PyG Data
+    # ------------------------------------------------------------------
+    X_t = torch.tensor(X, dtype=torch.float32, device=device)
+    y_t = torch.tensor(y, dtype=torch.int64, device=device)
+    edge_index = torch.tensor(edges.T, dtype=torch.long, device=device)
+
+    G = torch_geometric.data.Data(x=X_t, edge_index=edge_index, y=y_t)
+    if to_undirected:
+        G = torch_geometric.transforms.ToUndirected()(G)
+    G.edge_weight = torch.ones(G.edge_index.size(1), dtype=torch.float32, device=device)
+    G.W, G.L, G.dw = graph_params(G)
+
+    # ------------------------------------------------------------------
+    # 7. Build alert and normal patterns from connected components
+    # ------------------------------------------------------------------
+    classes_array = nodes_df["class"].values  # raw 1/2/3 per node index
+
+    alert_patterns = _components_to_patterns(
+        node_indices=np.where(classes_array == 1)[0],
+        edges=edges,
+        label="alert",
+        min_size=min_pattern_size,
+        max_size=max_pattern_size,
+    )
+    normal_patterns = _components_to_patterns(
+        node_indices=np.where(classes_array == 2)[0],
+        edges=edges,
+        label="normal",
+        min_size=min_pattern_size,
+        max_size=max_pattern_size,
+    )
+
+    print(f"\n  Alert patterns (connected illicit components): {len(alert_patterns)}")
+    print(f"  Normal patterns (connected licit components): {len(normal_patterns)}")
+
+    # ------------------------------------------------------------------
+    # 8. Train / test split
+    # ------------------------------------------------------------------
+    alert_train, alert_test = split_patterns(
+        alert_patterns, train_ratio=train_ratio, seed=seed
+    )
+    normal_train, normal_test = split_patterns(
+        normal_patterns, train_ratio=train_ratio, seed=seed
+    )
+
+    print(f"\n  Alert  — train: {len(alert_train)}, test: {len(alert_test)}")
+    print(f"  Normal — train: {len(normal_train)}, test: {len(normal_test)}")
+
+    # ------------------------------------------------------------------
+    # 9. Derive train_idx / val_idx / test_idx from pattern membership
+    # ------------------------------------------------------------------
+    alert_train_nodes = get_pattern_node_indices(alert_train)
+    normal_train_nodes = get_pattern_node_indices(normal_train)
+    train_nodes = (
+        torch.unique(torch.cat([alert_train_nodes, normal_train_nodes]))
+        if (len(alert_train_nodes) + len(normal_train_nodes) > 0)
+        else torch.tensor([], dtype=torch.long)
+    )
+
+    all_nodes = torch.arange(N, dtype=torch.long)
+    test_nodes = all_nodes[~torch.isin(all_nodes, train_nodes)]
+
+    print(
+        f"\n  Training nodes: {len(train_nodes):,}  |  Test/val nodes: {len(test_nodes):,}"
+    )
+
+    G.train_idx = train_nodes
+    G.val_idx = test_nodes
+    G.test_idx = test_nodes
+
+    return G, alert_train, normal_train, alert_test, normal_test
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _components_to_patterns(
+    node_indices: np.ndarray,
+    edges: np.ndarray,
+    label: str,
+    min_size: int = 2,
+    max_size: Optional[int] = None,
+) -> List[Pattern]:
+    """Build one Pattern per connected component in the induced subgraph.
+
+    Parameters
+    ----------
+    node_indices : 1-D array of node indices (in the 0-based remapped space)
+    edges        : (M, 2) array of all edges in the subgraph
+    label        : "alert" or "normal"
+    min_size     : skip components smaller than this
+    max_size     : skip components larger than this (None = no cap)
+    """
+    if len(node_indices) == 0:
+        return []
+
+    node_set = set(node_indices.tolist())
+
+    # Build NetworkX undirected graph induced on these nodes
+    H = nx.Graph()
+    H.add_nodes_from(node_indices)
+    for u, v in edges:
+        if u in node_set and v in node_set:
+            H.add_edge(int(u), int(v))
+
+    patterns: List[Pattern] = []
+    for comp_id, component in enumerate(nx.connected_components(H)):
+        if len(component) < min_size:
+            continue
+        if max_size is not None and len(component) > max_size:
+            continue
+        nodes_arr = np.array(sorted(component), dtype=np.int64)
+        pattern = create_pattern(
+            pattern_id=f"{label}_{comp_id}",
+            nodes=nodes_arr,
+            pattern_type="unknown",
+            label=label,
+        )
+        patterns.append(pattern)
+
+    return patterns

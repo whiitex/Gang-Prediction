@@ -94,7 +94,7 @@ def build_gang_aware_basis(
     # Step 0: Build seed vectors
     S, labels = _build_seed_vectors(
         n=n,
-        malicious_patterns=malicious_patterns,
+        alert_patterns=malicious_patterns,
         normal_patterns=normal_patterns,
         add_discrimination_seed=add_discrimination_seed,
         normalize_seeds=normalize_seeds,
@@ -181,7 +181,7 @@ def build_gang_aware_basis_lda(
     # Build seeds (without discrimination seed - we'll use LDA instead)
     S, labels = _build_seed_vectors(
         n=n,
-        malicious_patterns=malicious_patterns,
+        alert_patterns=malicious_patterns,
         normal_patterns=normal_patterns,
         add_discrimination_seed=False,
         normalize_seeds=normalize_seeds,
@@ -683,4 +683,212 @@ def get_gang_aware_basis(
         normal_patterns=normal_patterns,
         alpha=alpha,
         use_lda=use_lda,
+    )
+
+
+# ============================================================================
+# Q-Trick: Constraint-subspace coarsening
+# ============================================================================
+
+
+def build_qtrick_basis(
+    G: Data,
+    alert_patterns: List[Pattern],
+    normal_patterns: List[Pattern],
+    k: int = 32,
+    include_free_nodes: bool = True,
+    device: Optional[str] = None,
+) -> torch.Tensor:
+    """Build a basis via the Q-trick (constraint-subspace eigenproblem).
+
+    Known must-link groups (patterns) define a constraint subspace
+    S = {x in R^N : x_i = x_j inside each group}.  We represent S = im(Q)
+    with a binary indicator matrix Q, project the Laplacian onto that
+    subspace (L_Q = Q^T L Q), solve the reduced eigenproblem, and return
+    the k smoothest vectors that live inside S.
+
+    Parameters
+    ----------
+    G : torch_geometric.data.Data
+        Input graph.  Must have a Laplacian ``G.L`` or edge information so
+        one can be computed.
+    alert_patterns : List[Pattern]
+        Alert / malicious patterns (each pattern is one must-link group).
+    normal_patterns : List[Pattern]
+        Normal patterns (each pattern is one must-link group).
+    k : int, default 32
+        Number of smoothest eigenvectors to keep.
+    include_free_nodes : bool, default True
+        If True, nodes that do not belong to any pattern each get their own
+        column in Q (they remain "free").  If False, Q only has columns for
+        the groups and V will be zero on free nodes.
+    device : str, optional
+        Computation device.
+
+    Returns
+    -------
+    V : torch.Tensor
+        Orthonormal-column matrix of shape (N, k') where k' = min(k, d)
+        and d = number of columns of Q.  Every pair of nodes inside the
+        same must-link group shares the same row in V.
+    """
+    if device is None:
+        device = G.x.device if hasattr(G, "x") and G.x is not None else "cpu"
+
+    N = G.num_nodes
+
+    # Ensure the graph has a Laplacian
+    if not hasattr(G, "L") or G.L is None:
+        G.W, G.L, G.dw = graph_params(G)
+
+    L = G.L
+
+    # ------------------------------------------------------------------
+    # 1. Build Q  (N x d)
+    # ------------------------------------------------------------------
+    Q, d = _build_Q_matrix(
+        N=N,
+        alert_patterns=alert_patterns,
+        normal_patterns=normal_patterns,
+        include_free_nodes=include_free_nodes,
+        device=device,
+    )
+
+    # Clamp k to the reduced dimension
+    k = min(k, d)
+
+    # ------------------------------------------------------------------
+    # 2. Reduced Laplacian  L_Q = Q^T L Q   (d x d, dense)
+    # ------------------------------------------------------------------
+    # L is sparse (N x N), Q is dense (N x d)
+    LQ = torch.sparse.mm(L, Q)  # (N, d)
+    L_Q = Q.T @ LQ  # (d, d)
+    # Symmetrize to remove floating-point asymmetry
+    L_Q = 0.5 * (L_Q + L_Q.T)
+
+    # ------------------------------------------------------------------
+    # 3. Solve reduced eigenproblem  L_Q y = lambda y
+    # ------------------------------------------------------------------
+    eigenvalues, Y = torch.linalg.eigh(L_Q)  # sorted ascending
+    Y_k = Y[:, :k]  # k smallest eigenvectors  (d, k)
+
+    # ------------------------------------------------------------------
+    # 4. Lift back to full space:  V = Q Y_k   (N, k)
+    # ------------------------------------------------------------------
+    V = Q @ Y_k
+
+    # Orthonormalize (Q Y_k is already nearly orthonormal when Q has
+    # unit-norm columns but a QR pass removes any residual error).
+    V, _ = torch.linalg.qr(V)
+
+    return V
+
+
+def _build_Q_matrix(
+    N: int,
+    alert_patterns: List[Pattern],
+    normal_patterns: List[Pattern],
+    include_free_nodes: bool = True,
+    device: str = "cpu",
+) -> Tuple[torch.Tensor, int]:
+    """Construct the constraint indicator matrix Q.
+
+    Q has one column per must-link group (pattern) and, optionally, one
+    column per free node (a node that belongs to no pattern).
+
+    Nodes that appear in multiple patterns are assigned to the first
+    pattern encountered (ensuring disjoint groups, as required by the
+    constraint subspace formulation).
+
+    Parameters
+    ----------
+    N : int
+        Number of nodes.
+    alert_patterns, normal_patterns : List[Pattern]
+        Pattern objects whose ``.node_indices`` attribute gives the list
+        of node indices.
+    include_free_nodes : bool
+        Whether to add identity columns for nodes not in any group.
+    device : str
+        Torch device.
+
+    Returns
+    -------
+    Q : torch.Tensor
+        Dense matrix of shape (N, d).
+    d : int
+        Number of columns in Q.
+    """
+    used = set()
+    groups: List[List[int]] = []
+
+    for pattern in list(alert_patterns) + list(normal_patterns):
+        indices = pattern.node_indices
+        # Keep only nodes not yet assigned (disjoint groups)
+        unique = [i for i in indices if i not in used]
+        if len(unique) == 0:
+            continue
+        used.update(unique)
+        groups.append(unique)
+
+    # Identify free nodes
+    free_nodes = sorted(set(range(N)) - used) if include_free_nodes else []
+
+    d = len(groups) + len(free_nodes)
+    Q = torch.zeros(N, d, device=device)
+
+    col = 0
+    # Group columns: constant 1 for every node in the group
+    for group in groups:
+        idx = torch.tensor(group, dtype=torch.long, device=device)
+        Q[idx, col] = 1.0
+        col += 1
+
+    # Free-node columns: one-hot
+    for node in free_nodes:
+        Q[node, col] = 1.0
+        col += 1
+
+    return Q, d
+
+
+def get_qtrick_basis(
+    G: Data,
+    alert_patterns: List[Pattern],
+    normal_patterns: List[Pattern],
+    K: int = 32,
+    include_free_nodes: bool = True,
+) -> torch.Tensor:
+    """Convenience wrapper for the Q-trick basis (mirrors ``get_gang_aware_basis``).
+
+    Parameters
+    ----------
+    G : Data
+        The graph.
+    alert_patterns : list
+        Alert / malicious patterns.
+    normal_patterns : list
+        Normal patterns.
+    K : int
+        Target subspace dimension.
+    include_free_nodes : bool
+        Include one column per free node in Q.
+
+    Returns
+    -------
+    V : torch.Tensor
+        Basis matrix of shape (N, K').
+    """
+    if len(alert_patterns) == 0 and len(normal_patterns) == 0:
+        print("Warning [Qtrick]: No patterns provided. Falling back to spectral basis.")
+        from src.GangPrediction.coarsening_utils import calc_B
+
+        return calc_B(G, K)
+
+    return build_qtrick_basis(
+        G=G,
+        alert_patterns=alert_patterns,
+        normal_patterns=normal_patterns,
+        k=K,
+        include_free_nodes=include_free_nodes,
     )

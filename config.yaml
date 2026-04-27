@@ -1,16 +1,32 @@
-experiment: tutorial_demo13
-method: variation_edges    # learning_vectors, learning_bases, variation_edges, variation_bases, variation_neighborhood, variation_star
+experiment: elliptic_demo
+# experiment: tutorial_demo16
+method: variation_edges    # use_subspaces,  learning_vectors, learning_bases, variation_edges, variation_bases, variation_neighborhood, variation_star, learned_variation_edges, edge_gangs, qtrick
 remove_overlaps: False
-max_levels: 10
+
+# ---- Elliptic++ dataset configuration ----
+dataset_type: elliptic_actors      # "elliptic", "elliptic_actors", or "amlgentex" (default when absent)
+elliptic_config:
+  data_dir: data/elliptic               # directory containing txs_features.csv, txs_classes.csv, txs_edgelist.csv
+  actors_data_dir: data/elliptic_actors # directory containing wallets_features.csv, wallets_classes.csv, AddrAddr_edgelist.csv
+  day_start: 34             # first time step (inclusive)
+  day_end: 35               # last  time step (inclusive)
+  test_day_start: 36        # held-out test window (days after day_end)
+  test_day_end: 40
+
+  min_pattern_size: 5       # minimum component size to become a pattern
+  seed: 42
+run_test: true              # set to true to evaluate on a held-out test graph after training
+max_levels: 5
 max_epsilon: 50
 plot_gifs: false
 
 train_config:
-  K: 100
-  nhid: 8
-  lr: 0.001
+  K: 250
+  nhid: 10
+  lr: 0.003
   wd: 0.000001
   dropout: 0.1
+  pretrain_epochs: 50
   initial_epochs: 3
   min_epochs: 1
   max_epoch_interval: 1
@@ -18,14 +34,30 @@ train_config:
   loss_threshold: 0.002
   alpha: 1.0
   compression_method: svd
-  epsilon_schedule_power: 0.04
-  GNN_type: DGCN
-  num_layers: 4
+  epsilon_schedule_power: 0.01
+  GNN_type: SAGE
+  num_layers: 3
   use_edge_weights: False
-  coarsening_weight: 0.0
   use_labels_for_coarsening: False
-  use_super_node_loss: False
 
+
+  use_supernode_loss: True
+  use_spectral_consistency_loss: False
+  use_edge_correction_reg: False
+  use_pattern_type_loss: False
+  use_surrogate_epsilon: False
+  coarse_weight: 0.2
+  pattern_type_weight: 1
+  spectral_consistency_weight: 1
+  edge_correction_weight: 1
+  epsilon_weight: 1
+
+  intra_weight: 1.0
+  inter_weight: 1.0
+  pull_weight: 1.0
+  push_weight: 1.0
+  supernode_intra_weight: 100.0
+  supernode_negative_weight: 0
 
 
 alert_thresholds:

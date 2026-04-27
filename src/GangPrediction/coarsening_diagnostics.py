@@ -284,11 +284,15 @@ def _plot_multilevel_merge_count_trajectories(
     # LOGGER.info(f"  saved → {path}")
 
 
-def compute_spectral_decomp(G: Data, K_max: int = 300) -> Tuple[np.ndarray, np.ndarray]:
+def compute_spectral_decomp(
+    G: Data,
+    K_max: int = 300,
+    dense_threshold: int = 1000,
+) -> Tuple[np.ndarray, np.ndarray]:
     """Return (eigenvalues, eigenvectors) of the graph Laplacian.
 
-    For large graphs lobpcg is used (K_max smallest eigenvectors).
-    For small graphs the full dense decomposition is done.
+    For graphs with N ≤ *dense_threshold* the full dense decomposition is used.
+    For larger graphs lobpcg is used (K_max smallest eigenvectors).
 
     Returns
     -------
@@ -300,7 +304,7 @@ def compute_spectral_decomp(G: Data, K_max: int = 300) -> Tuple[np.ndarray, np.n
     K = min(K_max, N)
     L = G.L
 
-    if N <= 1000:
+    if N <= dense_threshold:
         d, V = torch.linalg.eigh(L.to_dense())
         lk = _to_numpy(d[:K])
         Uk = _to_numpy(V[:, :K])
@@ -413,13 +417,18 @@ def spectral_fingerprint(
     K_max: int = 200,
     save_dir: str = "results/coarsening_diagnostics",
     name_prefix: str = "",
-) -> None:
+    return_stats: bool = False,
+    dense_threshold: int = 1000,
+) -> Optional[Dict]:
     """Plot how much energy gang pattern indicators project onto each eigenvector.
 
     Plots saved
     -----------
     * {name_prefix}spectral_fingerprint_heatmap.png   — patterns × eigenvector rank heat map
     * {name_prefix}spectral_fingerprint_cumulative.png — cumulative energy vs K for gang vs random
+
+    If *return_stats* is True, returns a dict with keys:
+        energy, k50_alert, k90_alert, K
     """
     os.makedirs(save_dir, exist_ok=True)
     G = _ensure_graph_params(G)
@@ -429,7 +438,9 @@ def spectral_fingerprint(
     LOGGER.info(
         f"[spectral_fingerprint] computing {K} eigenvectors for {N}-node graph …"
     )
-    lk, Uk = compute_spectral_decomp(G, K_max=K)  # (N, K)
+    lk, Uk = compute_spectral_decomp(
+        G, K_max=K, dense_threshold=dense_threshold
+    )  # (N, K)
 
     # Build pattern indicators
     alerts = alert_patterns or []
@@ -526,7 +537,8 @@ def spectral_fingerprint(
     if alert_energy is not None:
         ax.plot(
             ks,
-            np.cumsum(alert_energy),
+            # np.cumsum(alert_energy),
+            alert_energy,
             label="Alert patterns (mean)",
             color="crimson",
             lw=2,
@@ -534,14 +546,16 @@ def spectral_fingerprint(
     if normal_energy is not None:
         ax.plot(
             ks,
-            np.cumsum(normal_energy),
+            # np.cumsum(normal_energy),
+            normal_energy,
             label="Normal patterns (mean)",
             color="steelblue",
             lw=2,
         )
     ax.plot(
         ks,
-        np.cumsum(random_energy),
+        # np.cumsum(random_energy),
+        random_energy,
         label="Random sets (baseline)",
         color="gray",
         lw=1.5,
@@ -549,12 +563,12 @@ def spectral_fingerprint(
     )
 
     ax.set_xlabel("Number of eigenvectors K preserved")
-    ax.set_ylabel("Cumulative projection energy")
-    ax.set_title("How much gang signal lives in the first K eigenvectors?")
+    ax.set_ylabel("Projection energy")
+    ax.set_title("How much gang signal lives in the K-th eigenvectors?")
     ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    path = os.path.join(save_dir, f"{name_prefix}spectral_fingerprint_cumulative.png")
+    path = os.path.join(save_dir, f"{name_prefix}spectral_fingerprint_energy.png")
     plt.savefig(path, dpi=120)
     plt.close()
     # LOGGER.info(f"  saved → {path}")
@@ -583,6 +597,14 @@ def spectral_fingerprint(
     LOGGER.info(
         f"  [summary] alert patterns: 50% energy in first {k50_alert} eigvecs, 90% in first {k90_alert}"
     )
+
+    if return_stats:
+        return {
+            "energy": energy,
+            "k50_alert": k50_alert,
+            "k90_alert": k90_alert,
+            "K": K,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -671,7 +693,7 @@ def merge_recall_precision_vs_K(
                 B=B,
                 method="variation_edges",
                 algorithm="greedy",
-                level=level,
+                # level=level,
                 r_cur=1.0,
                 max_sigma=max_sigma,
             )
@@ -890,7 +912,7 @@ def epsilon_schedule_ablation(
                 B=B,
                 method="variation_edges",
                 algorithm="greedy",
-                level=level,
+                # level=level,
                 r_cur=1.0,
                 max_sigma=max_sigma,
             )
@@ -1098,7 +1120,7 @@ def supernode_entropy_analysis(
                 B=B,
                 method="variation_edges",
                 algorithm="greedy",
-                level=level,
+                # level=level,
                 r_cur=1.0,
                 max_sigma=max_sigma,
             )
