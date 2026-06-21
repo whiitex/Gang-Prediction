@@ -132,7 +132,7 @@ def run_experiment():
     print("=" * 60)
     model = train_GNN(
         G,
-        epochs=100,
+        epochs=TRAIN_CONFIG.get("baseline_epochs", 100),
         lr=0.005,
         nhid=32,
         use_class_weights=True,
@@ -327,7 +327,9 @@ def run_experiment():
 
     # Train model on final coarsened graph for baseline comparison
     G_coarse = Gall_train[-1]
-    model_coarse = train_GNN(G_coarse, epochs=100, lr=0.005)
+    model_coarse = train_GNN(
+        G_coarse, epochs=TRAIN_CONFIG.get("baseline_epochs", 100), lr=0.005
+    )
     coarse_results = evaluate_model(model_coarse, G_coarse)
     acc_coarse = coarse_results["accuracy_test"]
 

@@ -16,9 +16,10 @@ import random
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import networkx as nx
 import numpy as np
 import pandas as pd
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components as sp_connected_components
 import torch
 import torch_geometric.data
 import torch_geometric.transforms
@@ -81,13 +82,25 @@ def load_elliptic_actors_data(
     # 1. Load & filter raw CSV files
     # ------------------------------------------------------------------
     print("  Reading wallets_features.csv …")
-    features_df = pd.read_csv(data_dir / "wallets_features.csv")
+    features_df = pd.read_csv(
+        data_dir / "wallets_features.csv",
+        dtype={"address": str, "Time step": "int32"},
+        low_memory=False,
+    )
 
     print("  Reading wallets_classes.csv …")
-    classes_df = pd.read_csv(data_dir / "wallets_classes.csv")
+    classes_df = pd.read_csv(
+        data_dir / "wallets_classes.csv",
+        dtype={"address": str},
+        low_memory=False,
+    )
 
     print("  Reading AddrAddr_edgelist.csv …")
-    edgelist_df = pd.read_csv(data_dir / "AddrAddr_edgelist.csv")
+    edgelist_df = pd.read_csv(
+        data_dir / "AddrAddr_edgelist.csv",
+        dtype={"input_address": str, "output_address": str},
+        low_memory=False,
+    )
 
     # Filter features to wallets active in the requested time window
     features_df = features_df[
@@ -256,22 +269,49 @@ def _components_to_patterns(
     if len(node_indices) == 0:
         return []
 
-    node_set = set(node_indices.tolist())
+    # Boolean lookup array — O(N) memory, vectorised membership test
+    num_nodes_total = (
+        max(int(edges.max()) + 1, int(node_indices.max()) + 1)
+        if len(edges) > 0
+        else int(node_indices.max()) + 1
+    )
+    in_set = np.zeros(num_nodes_total, dtype=bool)
+    in_set[node_indices] = True
 
-    # Build NetworkX undirected graph induced on these nodes
-    H = nx.Graph()
-    H.add_nodes_from(node_indices)
-    for u, v in edges:
-        if u in node_set and v in node_set:
-            H.add_edge(int(u), int(v))
+    # Vectorised edge filtering (no Python loop)
+    if len(edges) > 0:
+        mask = in_set[edges[:, 0]] & in_set[edges[:, 1]]
+        induced_edges = edges[mask]
+    else:
+        induced_edges = np.empty((0, 2), dtype=np.int64)
+
+    # Compact re-indexing: original node id → 0 … n-1
+    n = len(node_indices)
+    compact = np.full(num_nodes_total, -1, dtype=np.int64)
+    compact[node_indices] = np.arange(n)
+
+    # Build scipy sparse adjacency and run connected_components in C
+    if len(induced_edges) > 0:
+        src_c = compact[induced_edges[:, 0]]
+        dst_c = compact[induced_edges[:, 1]]
+        vals = np.ones(len(src_c), dtype=np.int8)
+        adj = csr_matrix((vals, (src_c, dst_c)), shape=(n, n))
+    else:
+        adj = csr_matrix((n, n), dtype=np.int8)
+
+    n_comps, comp_labels = sp_connected_components(
+        adj, directed=False, return_labels=True
+    )
 
     patterns: List[Pattern] = []
-    for comp_id, component in enumerate(nx.connected_components(H)):
-        if len(component) < min_size:
+    for comp_id in range(n_comps):
+        comp_mask = comp_labels == comp_id
+        comp_size = int(comp_mask.sum())
+        if comp_size < min_size:
             continue
-        if max_size is not None and len(component) > max_size:
+        if max_size is not None and comp_size > max_size:
             continue
-        nodes_arr = np.array(sorted(component), dtype=np.int64)
+        nodes_arr = node_indices[comp_mask]
         pattern = create_pattern(
             pattern_id=f"{label}_{comp_id}",
             nodes=nodes_arr,

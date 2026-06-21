@@ -212,7 +212,7 @@ def calc_B(Gc, K, U=None):
         # d, V = torch.linalg.eigh(T.to_dense())
         # Uk = V[:, -K:]
         # lk = d[-K:]
-        lk, Uk = torch.lobpcg(T, k=K, largest=True, tol=1e-9)
+        lk, Uk = torch.lobpcg(T, k=K, largest=True, tol=1e-6)
         # h, Q = arnoldi_iteration(T, K)
         # lk, U = torch.linalg.eigh(h)
         # Uk = Q @ U

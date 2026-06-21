@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
+import pandas as pd 
 import torch
 import torch_geometric.data
 import torch_geometric.transforms
@@ -437,6 +437,37 @@ def preprocess_patterns_with_alert_priority(
     }
 
     return alert_clean, normal_clean, stats
+
+
+def graph_params(G: torch_geometric.data.Data):
+    """Compute adjacency, Laplacian, and degree for a PyG graph."""
+    num_nodes = G.num_nodes
+    # edge_index, edge_weight = remove_self_loops(G.edge_index, G.edge_weight)
+    edge_index, edge_weight = G.edge_index, G.edge_weight
+
+    if edge_weight is None:
+        edge_weight = torch.ones(
+            edge_index.size(1), dtype=torch.float32, device=edge_index.device
+        )
+    # Use the de-looped edge_index (not G.edge_index) for the adjacency matrix
+    W = torch.sparse_coo_tensor(
+        edge_index,
+        edge_weight,
+        size=(num_nodes, num_nodes),
+        device=edge_index.device,
+    )
+
+    row, col = edge_index[0], edge_index[1]
+    deg = scatter(edge_weight, row, 0, dim_size=num_nodes, reduce="sum")
+
+    edge_index, _ = add_self_loops(edge_index, num_nodes=num_nodes)
+    edge_weight = torch.cat([-edge_weight, deg], dim=0)
+
+    L = torch.sparse_coo_tensor(
+        edge_index, edge_weight, size=(num_nodes, num_nodes), device=edge_index.device
+    )
+
+    return W, L, deg
 
 
 def create_subspace(alert_patterns, normal_patterns, num_nodes, device):
