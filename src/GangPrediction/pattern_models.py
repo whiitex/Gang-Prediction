@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Type
 
 import numpy as np
 import torch
+
 # from sklearn.metrics import precision_recall_curve, roc_auc_score, auc
 
 from src.GangPrediction.utils.utils import *
@@ -116,7 +117,7 @@ class Pattern:
         self,
         node_to_supernode: Optional[torch.Tensor] = None,
         pseudo_labels: Optional[torch.Tensor] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Store node-level supernode and pseudo-label lineage for one level."""
         if node_to_supernode is not None:
             super_nodes = node_to_supernode[self.nodes]
@@ -131,7 +132,7 @@ class Pattern:
             )
         )
 
-        self.compute_detection_metrics(node_to_supernode=node_to_supernode)
+        return self.compute_detection_metrics(node_to_supernode=node_to_supernode)
 
     @staticmethod
     def average_metrics(
